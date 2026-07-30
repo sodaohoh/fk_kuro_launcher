@@ -1,0 +1,8 @@
+[package]
+name = "fk_kuro_launcher"
+version = "0.1.0"
+edition = "2021"
+authors = ["sodaohoh"]
+description = "Wuthering Waves log monitor & auto-restart launcher"
+
+[dependencies]
