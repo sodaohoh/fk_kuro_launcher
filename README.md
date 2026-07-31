@@ -1,5 +1,9 @@
 # fk_kuro_launcher
 
+[![CI & Release Build](https://github.com/sodaohoh/fk_kuro_launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/sodaohoh/fk_kuro_launcher/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/sodaohoh/fk_kuro_launcher)](https://github.com/sodaohoh/fk_kuro_launcher/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A lightweight, non-intrusive Steam Wrapper & Auto-Restart tool for **Wuthering Waves (鳴潮)** written in 100% Rust.
 
 [English](#-english) | [繁體中文](#-繁體中文)
