@@ -42,7 +42,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 To uninstall `fk_kuro_launcher` and automatically restore Steam Launch Options, run:
 
 ```powershell
-& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
 ```
 
 Or locally:

@@ -39,10 +39,10 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 
 ## 一鍵卸載說明
 
-若要卸載 `fk_kuro_launcher` 並自動清除 Steam 啟動選項設定：
+若要卸載 `fk_kuro_launcher` 並自動清除 Steam 啟動選項設定，請在 PowerShell 執行：
 
 ```powershell
-& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
 ```
 
 或在本地專案目錄執行：
