@@ -42,11 +42,11 @@ if ($Uninstall) {
     $UserDataDir = Join-Path $SteamDir "userdata"
 
     # 2. Close Steam gracefully if running
-    $steamProc = Get-Process -Name "steam" -ErrorAction SilentlyContinue
-    if ($steamProc) {
+    $steamProcs = Get-Process -Name "steam", "steamwebhelper" -ErrorAction SilentlyContinue
+    if ($steamProcs) {
         Write-Host "[INFO] Closing Steam to clear launch options safely..." -ForegroundColor Yellow
-        Stop-Process -Name "steam" -Force
-        [void]$steamProc.WaitForExit(10000)
+        Stop-Process -Name "steam", "steamwebhelper" -Force -ErrorAction SilentlyContinue
+        $steamProcs | ForEach-Object { try { [void]$_.WaitForExit(5000) } catch {} }
         Start-Sleep -Seconds 2
     }
 
@@ -65,7 +65,8 @@ if ($Uninstall) {
                         $bakPath = "$vdfPath.bak"
                         Copy-Item -Path $vdfPath -Destination $bakPath -Force
 
-                        $content = $content -replace '("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', '$1'
+                        $content = $content -replace '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', '$1'
+                        $content = $content -replace '(?m)^\s*"[^"]*fk_kuro_launcher[^"]*"\s+.*\r?\n', ''
 
                         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
                         [System.IO.File]::WriteAllText($vdfPath, $content, $utf8NoBom)
@@ -180,13 +181,31 @@ Write-Host "[INFO] Detected Steam directory: $SteamDir" -ForegroundColor Green
 $SteamExe = Join-Path $SteamDir "steam.exe"
 $UserDataDir = Join-Path $SteamDir "userdata"
 
-# 4. Close Steam if running and wait for termination
-$steamProc = Get-Process -Name "steam" -ErrorAction SilentlyContinue
-if ($steamProc) {
-    Write-Host "[INFO] Closing Steam to apply launch options safely..." -ForegroundColor Yellow
-    Stop-Process -Name "steam" -Force
-    [void]$steamProc.WaitForExit(10000)
+# 4. Close Steam and wait for complete process termination
+$steamProcs = Get-Process -Name "steam", "steamwebhelper" -ErrorAction SilentlyContinue
+if ($steamProcs) {
+    Write-Host "[INFO] Closing Steam safely before applying configuration..." -ForegroundColor Yellow
+    Stop-Process -Name "steam", "steamwebhelper" -Force -ErrorAction SilentlyContinue
+    $steamProcs | ForEach-Object { try { [void]$_.WaitForExit(5000) } catch {} }
     Start-Sleep -Seconds 2
+}
+
+function Update-SteamVdf([string]$vdfText, [string]$appId, [string]$launchOptionsVal) {
+    # Clean up any corrupted lines from previous script bugs
+    $cleanText = $vdfText -replace '(?m)^\s*"[^"]*fk_kuro_launcher[^"]*"\s+.*\r?\n', ''
+    $cleanText = $cleanText -replace '(?m)^\s*"LaunchOptions"\s+.*"LaunchOptions".*\r?\n', ''
+
+    # Check if AppID "2775500" block exists
+    if ($cleanText -match '(?i)"2775500"\s*\{') {
+        if ($cleanText -match '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*') {
+            return $cleanText -replace '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"")
+        } else {
+            return $cleanText -replace '(?i)("2775500"\s*\{)', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"")
+        }
+    } else {
+        $newBlock = "`"2775500`"`n`t`t`t`t{`n`t`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"`n`t`t`t`t}"
+        return $cleanText -replace '(?i)("Apps"|"apps")\s*\{', ('$1' + "`n`t`t`t`t" + $newBlock)
+    }
 }
 
 # 5. Update localconfig.vdf with safety backups for all Steam profiles
@@ -204,22 +223,10 @@ if (Test-Path $UserDataDir) {
 
             try {
                 $content = Get-Content -Path $vdfPath -Raw -Encoding UTF8
-
                 $vdfExePath = $InstalledExe.Replace('\', '\\')
                 $vdfLaunchOptions = "\`"$vdfExePath\`" %command%"
 
-                # Scoped regex matching specifically for 2775500 block (Wuthering Waves)
-                if ($content -match '"2775500"') {
-                    if ($content -match '("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*') {
-                        $content = $content -replace '("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$vdfLaunchOptions`"")
-                    } else {
-                        $content = $content -replace '("2775500"\s*\{)', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$vdfLaunchOptions`"")
-                    }
-                } else {
-                    # Inject 2775500 block under "apps"
-                    $newBlock = "`"2775500`"`n`t`t`t`t{`n`t`t`t`t`t`"LaunchOptions`"`t`t`"$vdfLaunchOptions`"`n`t`t`t`t}"
-                    $content = $content -replace '("apps"\s*\{)', ('$1' + "`n`t`t`t`t$newBlock")
-                }
+                $content = Update-SteamVdf -vdfText $content -appId "2775500" -launchOptionsVal $vdfLaunchOptions
 
                 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
                 [System.IO.File]::WriteAllText($vdfPath, $content, $utf8NoBom)
