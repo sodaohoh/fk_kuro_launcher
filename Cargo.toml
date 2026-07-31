@@ -6,3 +6,6 @@ authors = ["sodaohoh"]
 description = "Wuthering Waves log monitor & auto-restart launcher"
 
 [dependencies]
+
+[build-dependencies]
+winres = "0.1"

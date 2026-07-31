@@ -1,11 +1,14 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::Path;
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Build byte substitution table (LUT) for Kuro Games Client.log
 fn build_lut() -> [Option<char>; 256] {
@@ -110,8 +113,141 @@ fn spawn_game_process(game_exe: &str, game_args: &[String]) -> io::Result<Child>
         .spawn()
 }
 
+fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+    let mut parts = s.split('.');
+    let major: u64 = parts.next()?.parse().ok()?;
+    let minor: u64 = parts.next()?.parse().ok()?;
+    let patch_str = parts.next()?;
+    let patch_num_str: String = patch_str.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch: u64 = patch_num_str.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn is_newer_version(current: &str, latest: &str) -> bool {
+    if let (Some(cur), Some(lat)) = (parse_version(current), parse_version(latest)) {
+        lat > cur
+    } else {
+        false
+    }
+}
+
+fn apply_update(current_exe: &Path, new_exe: &Path) -> io::Result<()> {
+    let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
+
+    // Clean up any existing .old file from previous updates
+    if old_exe.exists() {
+        let _ = fs::remove_file(&old_exe);
+    }
+
+    // Rename currently running executable <exe_path> -> <exe_path>.old
+    fs::rename(current_exe, &old_exe)?;
+
+    // Move downloaded <exe_path>.new -> <exe_path>
+    if let Err(e) = fs::rename(new_exe, current_exe) {
+        // Rollback rename if moving new_exe failed
+        let _ = fs::rename(&old_exe, current_exe);
+        return Err(e);
+    }
+
+    // Clean up .old file if possible (may be locked on Windows until process exits)
+    let _ = fs::remove_file(&old_exe);
+
+    Ok(())
+}
+
+fn check_latest_release(current_version: &str) {
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$ProgressPreference = 'SilentlyContinue'; try { (Invoke-RestMethod -Uri 'https://api.github.com/repos/sodaohoh/fk_kuro_launcher/releases/latest' -UserAgent 'fk_kuro_launcher' -TimeoutSec 5).tag_name } catch {}",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let latest_tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !latest_tag.is_empty() && is_newer_version(current_version, &latest_tag) {
+                println!(
+                    "[INFO] New version detected ({}). Performing automatic update...",
+                    latest_tag
+                );
+
+                if let Ok(current_exe) = env::current_exe() {
+                    let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
+                    let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
+
+                    let download_output = Command::new("powershell")
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            "$ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri $args[0] -OutFile $args[1] -UseBasicParsing -ErrorAction Stop } catch { exit 1 }",
+                            download_url,
+                            new_exe.to_str().unwrap_or_default(),
+                        ])
+                        .output();
+
+                    match download_output {
+                        Ok(out) if out.status.success() && new_exe.exists() => {
+                            match apply_update(&current_exe, &new_exe) {
+                                Ok(()) => {
+                                    println!(
+                                        "[SUCCESS] Auto-update applied successfully! Version {} will run on next launch.",
+                                        latest_tag
+                                    );
+                                }
+                                Err(e) => {
+                                    println!("[ERROR] Auto-update failed to replace executable: {}", e);
+                                    let _ = fs::remove_file(&new_exe);
+                                }
+                            }
+                        }
+                        Ok(_) | Err(_) => {
+                            println!("[ERROR] Auto-update failed during download.");
+                            if new_exe.exists() {
+                                let _ = fs::remove_file(&new_exe);
+                            }
+                        }
+                    }
+                } else {
+                    println!("[ERROR] Auto-update failed: could not determine executable path.");
+                }
+            }
+        }
+    }
+}
+
 fn main() {
+    if let Ok(current_exe) = env::current_exe() {
+        let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
+        if old_exe.exists() {
+            let _ = fs::remove_file(&old_exe);
+        }
+    }
+
     let args: Vec<String> = env::args().collect();
+
+    if args.iter().any(|arg| arg == "--version" || arg == "-v") {
+        println!(
+            "fk_kuro_launcher v{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("BUILD_GIT_HASH")
+        );
+        std::process::exit(0);
+    }
+
+    println!(
+        "[INFO] Version: v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_GIT_HASH")
+    );
+
+    thread::spawn(|| {
+        check_latest_release(env!("CARGO_PKG_VERSION"));
+    });
 
     let default_log_path = r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves\Client\Saved\Logs\Client.log";
     let default_game_exe = r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe";
@@ -192,7 +328,7 @@ fn main() {
         // Monitor Client.log for hotfix restart triggers
         if let Ok(mut file) = OpenOptions::new()
             .read(true)
-            .share_access(7)
+            .share_mode(7)
             .open(log_path)
         {
             if let Ok(metadata) = file.metadata() {
@@ -224,5 +360,60 @@ fn main() {
         }
 
         thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_comparison() {
+        assert_eq!(parse_version("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_version("v0.2.0"), Some((0, 2, 0)));
+        assert_eq!(parse_version("V1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version("v0.2.0-rc1"), Some((0, 2, 0)));
+
+        assert!(is_newer_version("0.1.0", "v0.2.0"));
+        assert!(is_newer_version("v0.1.0", "v0.1.1"));
+        assert!(is_newer_version("0.1.0", "v1.0.0"));
+        assert!(is_newer_version("0.9.0", "v0.10.0"));
+
+        assert!(!is_newer_version("0.1.0", "v0.1.0"));
+        assert!(!is_newer_version("0.1.0", "v0.0.9"));
+        assert!(!is_newer_version("v0.2.0", "v0.1.0"));
+        assert!(!is_newer_version("invalid", "v0.1.0"));
+        assert!(!is_newer_version("0.1.0", "invalid"));
+    }
+
+    #[test]
+    fn test_apply_update_file_replacement() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_update");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let current_exe = temp_dir.join("test_launcher.exe");
+        let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
+        let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
+
+        // Create initial current_exe and new_exe
+        fs::write(&current_exe, b"old_version_content").unwrap();
+        fs::write(&new_exe, b"new_version_content").unwrap();
+
+        // Also simulate leftover .old file from a previous update
+        fs::write(&old_exe, b"ancient_version_content").unwrap();
+
+        // Perform file replacement
+        let res = apply_update(&current_exe, &new_exe);
+        assert!(res.is_ok(), "apply_update should succeed");
+
+        // Verify replaced file content
+        let updated_content = fs::read_to_string(&current_exe).unwrap();
+        assert_eq!(updated_content, "new_version_content");
+
+        // Verify .new file is gone
+        assert!(!new_exe.exists(), ".new file should be removed after rename");
+
+        // Cleanup temp dir
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

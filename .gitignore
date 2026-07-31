@@ -1,0 +1,12 @@
+# Cargo build artifacts
+/target
+Cargo.lock
+
+# Windows temporary files
+*.tmp
+*.log
+*.user
+
+# VS Code / IDE
+.vscode/
+.idea/
