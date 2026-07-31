@@ -220,6 +220,144 @@ fn check_latest_release(current_version: &str) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn get_steam_path_from_registry() -> Option<PathBuf> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(steam_key) = hkcu.open_subkey(r"Software\Valve\Steam") {
+        if let Ok(steam_path) = steam_key.get_value::<String, _>("SteamPath") {
+            if !steam_path.trim().is_empty() {
+                return Some(PathBuf::from(steam_path));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_steam_path_from_registry() -> Option<PathBuf> {
+    None
+}
+
+fn get_client_dir(path: &Path) -> PathBuf {
+    if let Some(p1) = path.parent() {
+        if let Some(p2) = p1.parent() {
+            if let Some(p3) = p2.parent() {
+                return p3.to_path_buf();
+            }
+        }
+        return p1.to_path_buf();
+    }
+    PathBuf::from(".")
+}
+
+fn resolve_log_path(primary_log: PathBuf, parent_dir: &Path) -> String {
+    let candidate1 = primary_log;
+    let candidate2 = parent_dir
+        .join("Client")
+        .join("Saved")
+        .join("Logs")
+        .join("Client.log");
+    let candidate3 = parent_dir.join("Client.log");
+
+    if candidate1.exists() {
+        candidate1.to_string_lossy().to_string()
+    } else if candidate2.exists() {
+        candidate2.to_string_lossy().to_string()
+    } else if candidate3.exists() {
+        candidate3.to_string_lossy().to_string()
+    } else {
+        candidate1.to_string_lossy().to_string()
+    }
+}
+
+pub fn resolve_paths(input_exe: Option<&str>) -> (String, String, Vec<String>) {
+    if let Some(input_str) = input_exe {
+        let path = PathBuf::from(input_str);
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        let is_shipping_exe = file_name.eq_ignore_ascii_case("Client-Win64-Shipping.exe")
+            || path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("client-win64-shipping.exe");
+
+        if is_shipping_exe {
+            let game_exe = input_str.to_string();
+            let client_dir = get_client_dir(&path);
+            let primary_log = client_dir.join("Saved").join("Logs").join("Client.log");
+            let root_dir = client_dir.parent().unwrap_or(&client_dir);
+            let log_path = resolve_log_path(primary_log, root_dir);
+            (game_exe, log_path, vec![])
+        } else {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            let shipping_exe = parent
+                .join("Client")
+                .join("Binaries")
+                .join("Win64")
+                .join("Client-Win64-Shipping.exe");
+            let primary_log = parent
+                .join("Client")
+                .join("Saved")
+                .join("Logs")
+                .join("Client.log");
+
+            let game_exe = if shipping_exe.exists() {
+                shipping_exe.to_string_lossy().to_string()
+            } else if file_name.eq_ignore_ascii_case("Wuthering Waves.exe")
+                || file_name.to_lowercase().contains("wuthering waves")
+            {
+                shipping_exe.to_string_lossy().to_string()
+            } else {
+                input_str.to_string()
+            };
+
+            let log_path = resolve_log_path(primary_log, parent);
+            (game_exe, log_path, vec![])
+        }
+    } else {
+        let base_dir = if let Some(steam_path) = get_steam_path_from_registry() {
+            let wuwa_dir = steam_path
+                .join("steamapps")
+                .join("common")
+                .join("Wuthering Waves");
+            if wuwa_dir.exists() {
+                wuwa_dir
+            } else {
+                steam_path
+                    .join("steamapps")
+                    .join("common")
+                    .join("Wuthering Waves")
+            }
+        } else {
+            PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves")
+        };
+
+        let shipping_exe = base_dir
+            .join("Client")
+            .join("Binaries")
+            .join("Win64")
+            .join("Client-Win64-Shipping.exe");
+        let primary_log = base_dir
+            .join("Client")
+            .join("Saved")
+            .join("Logs")
+            .join("Client.log");
+
+        let log_path = resolve_log_path(primary_log, &base_dir);
+        (
+            shipping_exe.to_string_lossy().to_string(),
+            log_path,
+            vec![],
+        )
+    }
+}
+
 fn main() {
     if let Ok(current_exe) = env::current_exe() {
         let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
@@ -249,16 +387,11 @@ fn main() {
         check_latest_release(env!("CARGO_PKG_VERSION"));
     });
 
-    let default_log_path = r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves\Client\Saved\Logs\Client.log";
-    let default_game_exe = r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe";
-
-    let (game_exe, game_args) = if args.len() > 1 {
-        (args[1].clone(), args[2..].to_vec())
-    } else {
-        (default_game_exe.to_string(), vec![])
-    };
-
-    let log_path = default_log_path;
+    let input_exe = args.get(1).map(|s| s.as_str());
+    let (game_exe, log_path, mut game_args) = resolve_paths(input_exe);
+    if args.len() > 2 {
+        game_args.extend(args[2..].to_vec());
+    }
 
     println!("[INFO] Steam Wrapper Monitor Started.");
     println!("[INFO] Executable Target: {}", game_exe);
@@ -267,7 +400,7 @@ fn main() {
     let lut = build_lut();
 
     // Initialize offset to current end of file
-    let mut offset: u64 = if let Ok(metadata) = fs::metadata(log_path) {
+    let mut offset: u64 = if let Ok(metadata) = fs::metadata(&log_path) {
         metadata.len()
     } else {
         0
@@ -300,7 +433,7 @@ fn main() {
                             println!("[SUCCESS] Game respawned with PID: {}", child.id());
                             game_child = child;
                             is_hotfix_restart = false;
-                            if let Ok(meta) = fs::metadata(log_path) {
+                            if let Ok(meta) = fs::metadata(&log_path) {
                                 offset = meta.len();
                             }
                             thread::sleep(Duration::from_secs(5));
@@ -329,7 +462,7 @@ fn main() {
         if let Ok(mut file) = OpenOptions::new()
             .read(true)
             .share_mode(7)
-            .open(log_path)
+            .open(&log_path)
         {
             if let Ok(metadata) = file.metadata() {
                 let file_len = metadata.len();
@@ -414,6 +547,83 @@ mod tests {
         assert!(!new_exe.exists(), ".new file should be removed after rename");
 
         // Cleanup temp dir
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_resolve_paths_wuthering_waves_shim() {
+        let input = r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Wuthering Waves.exe";
+        let (game_exe, log_path, game_args) = resolve_paths(Some(input));
+        let expected_game_exe = PathBuf::from(r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe")
+            .to_string_lossy()
+            .to_string();
+        let expected_log_path = PathBuf::from(r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Saved\Logs\Client.log")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(game_exe, expected_game_exe);
+        assert_eq!(log_path, expected_log_path);
+        assert!(game_args.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_paths_shipping_exe_direct() {
+        let input = r"E:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe";
+        let (game_exe, log_path, game_args) = resolve_paths(Some(input));
+        let expected_game_exe = input.to_string();
+        let expected_log_path = PathBuf::from(r"E:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Saved\Logs\Client.log")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(game_exe, expected_game_exe);
+        assert_eq!(log_path, expected_log_path);
+        assert!(game_args.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_paths_standalone_none() {
+        let (game_exe, log_path, game_args) = resolve_paths(None);
+        assert!(game_exe.to_lowercase().contains("client-win64-shipping.exe"));
+        assert!(log_path.to_lowercase().contains("client.log"));
+        assert!(game_args.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_paths_with_existing_files() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_paths_existing");
+        let client_dir = temp_dir.join("Client");
+        let win64_dir = client_dir.join("Binaries").join("Win64");
+        let logs_dir = client_dir.join("Saved").join("Logs");
+        let _ = fs::create_dir_all(&win64_dir);
+        let _ = fs::create_dir_all(&logs_dir);
+
+        let shipping_exe = win64_dir.join("Client-Win64-Shipping.exe");
+        let log_file = logs_dir.join("Client.log");
+        let _ = fs::write(&shipping_exe, b"fake_exe");
+        let _ = fs::write(&log_file, b"fake_log");
+
+        let shim_exe = temp_dir.join("Wuthering Waves.exe");
+        let shim_str = shim_exe.to_str().unwrap();
+
+        let (game_exe, log_path, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(game_exe), shipping_exe);
+        assert_eq!(PathBuf::from(log_path), log_file);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_paths_fallback_client_log() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_paths_fallback");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        // Create parent level Client.log fallback instead of Client/Saved/Logs/Client.log
+        let fallback_log = temp_dir.join("Client.log");
+        let _ = fs::write(&fallback_log, b"fake_fallback_log");
+
+        let shim_exe = temp_dir.join("Wuthering Waves.exe");
+        let shim_str = shim_exe.to_str().unwrap();
+
+        let (_, log_path, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(log_path), fallback_log);
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }
