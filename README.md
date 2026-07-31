@@ -23,7 +23,7 @@ In *Wuthering Waves*, in-game hotfix updates exit the client to apply patches. W
 Run this command in PowerShell to automatically install and set up Steam Launch Options:
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.ps1 | iex
 ```
 
 ---
@@ -42,7 +42,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 To uninstall `fk_kuro_launcher` and automatically restore Steam Launch Options, run:
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/uninstall.ps1 | iex
 ```
 
 Or locally:

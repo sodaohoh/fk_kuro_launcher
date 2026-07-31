@@ -23,7 +23,7 @@
 在 PowerShell 中複製並執行以下指令，系統會自動下載安裝並設定 Steam 啟動選項：
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.ps1 | iex
 ```
 
 ---
@@ -42,7 +42,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 若要卸載 `fk_kuro_launcher` 並自動清除 Steam 啟動選項設定，請在 PowerShell 執行：
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/uninstall.ps1 | iex
 ```
 
 或在本地專案目錄執行：

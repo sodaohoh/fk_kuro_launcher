@@ -15,7 +15,7 @@
 Run in PowerShell to automatically install or update `fk_kuro_launcher` and inject Steam launch options:
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.ps1 | iex
 ```
 
 ---
@@ -25,5 +25,5 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 Run in PowerShell to clean up Steam launch options and remove installed files:
 
 ```powershell
-& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
+irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/uninstall.ps1 | iex
 ```
