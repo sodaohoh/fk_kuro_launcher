@@ -6,11 +6,11 @@
 
 A lightweight, non-intrusive Steam Wrapper & Auto-Restart tool for **Wuthering Waves (鳴潮)** written in 100% Rust.
 
-[English](#-english) | [繁體中文](#-繁體中文)
+[English](#english) | [繁體中文](#繁體中文)
 
 ---
 
-## 📖 English
+## English
 
 ### Overview
 In *Wuthering Waves*, in-game hotfixes download `.pak` patch files and exit the client with return code `0` (indistinguishable from a manual game exit). When launched via Steam, this causes the game to stop running and requires manually clicking "Play" again to apply the patch.
@@ -24,7 +24,7 @@ In *Wuthering Waves*, in-game hotfixes download `.pak` patch files and exit the 
 
 ---
 
-### 🚀 1-Click Automated Setup (Recommended)
+### 1-Click Automated Setup (Recommended)
 
 Run the 1-click installer command in PowerShell:
 ```powershell
@@ -48,7 +48,7 @@ Or specify a custom executable path:
 
 ---
 
-### 🔄 Auto-Update
+### Auto-Update
 
 `fk_kuro_launcher` includes full automatic update functionality:
 - **Installer Auto-Update (`install.ps1`)**: Running `install.ps1` automatically downloads and updates `%LOCALAPPDATA%\fk_kuro_launcher\fk_kuro_launcher.exe` to the latest GitHub Release asset. If offline or network download fails, existing installations are preserved.
@@ -56,9 +56,9 @@ Or specify a custom executable path:
 
 ---
 
-### 🎮 Manual Steam Setup
+### Manual Steam Setup
 
-1. Open **Steam**, right-click **Wuthering Waves** ➔ **Properties**.
+1. Open **Steam**, right-click **Wuthering Waves** -> **Properties**.
 2. Under **General**, find **Launch Options**.
 3. Paste the following command (replace `%LOCALAPPDATA%` with your actual AppData Local path if needed):
 
@@ -68,7 +68,7 @@ Or specify a custom executable path:
 
 ---
 
-### 🛠️ Building from Source (Rust)
+### Building from Source (Rust)
 
 ```bash
 cd C:\path\to\fk_kuro_launcher
@@ -78,28 +78,26 @@ The compiled executable is located at `target/release/fk_kuro_launcher.exe` (or 
 
 ---
 
-### 🗑️ Uninstallation
+### Uninstallation
 
 To uninstall `fk_kuro_launcher` and automatically clear Steam Launch Options:
 
 **1-Click Web Command:**
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
+& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
 ```
 
 **Local Command:**
 ```powershell
 .\install.ps1 -Uninstall
 ```
-*(or run `.\uninstall.ps1` directly)*
-
 ---
 
 <br>
 
 ---
 
-## 📖 繁體中文
+## 繁體中文
 
 ### 專案簡介
 在《鳴潮》進行遊戲內熱更新時，遊戲主程式會下載 `.pak` 補丁檔並回傳 `0` 號結束碼退出（外觀與玩家手動關閉遊戲無異）。透過 Steam 啟動時，Steam 會判定遊戲已停止，必須手動再次點擊「開始遊戲」才能載入補丁。
@@ -113,7 +111,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.p
 
 ---
 
-### 🚀 一鍵全自動 Steam 設定（推薦）
+### 一鍵全自動 Steam 設定（推薦）
 
 在 PowerShell 中直接執行一鍵安裝指令：
 ```powershell
@@ -137,7 +135,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 
 ---
 
-### 🔄 自動更新 (Auto-Update)
+### 自動更新 (Auto-Update)
 
 `fk_kuro_launcher` 支援全自動更新功能：
 - **安裝檔自動更新 (`install.ps1`)**: 執行 `install.ps1` 時會自動從 GitHub Releases 下載並更新 `%LOCALAPPDATA%\fk_kuro_launcher\fk_kuro_launcher.exe` 至最新版本（若網路下載失敗，將保留現有版本）。
@@ -145,10 +143,10 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 
 ---
 
-### 🎮 手動 Steam 啟動選項設定
+### 手動 Steam 啟動選項設定
 
-1. 開啟 **Steam** 收藏庫，右鍵點擊 **《鳴潮》 ➔ 內容**。
-2. 在 **一般 ➔ 啟動選項** 輸入框貼入以下指令：
+1. 開啟 **Steam** 收藏庫，右鍵點擊 **《鳴潮》 -> 內容**。
+2. 在 **一般 -> 啟動選項** 輸入框貼入以下指令：
 
 ```cmd
 "%LOCALAPPDATA%\fk_kuro_launcher\fk_kuro_launcher.exe" %command%
@@ -156,7 +154,7 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 
 ---
 
-### 🛠️ 編譯說明 (Rust)
+### 編譯說明 (Rust)
 
 ```bash
 cd C:\path\to\fk_kuro_launcher
@@ -166,22 +164,21 @@ cargo build --release
 
 ---
 
-### 🗑️ 卸載說明
+### 卸載說明
 
 若要卸載 `fk_kuro_launcher` 並自動清除 Steam 啟動選項設定：
 
 **一鍵線上卸載指令：**
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
+& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
 ```
 
 **本地卸載指令：**
 ```powershell
 .\install.ps1 -Uninstall
 ```
-*(或直接執行 `.\uninstall.ps1`)*
 
 ---
 
-### 📄 授權條款 (License)
+### 授權條款 (License)
 本專案採用 [MIT License](LICENSE) 授權。

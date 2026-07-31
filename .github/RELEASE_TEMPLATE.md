@@ -1,6 +1,6 @@
 # Release vX.Y.Z
 
-## 🚀 Features & Highlights
+## Features & Highlights
 
 - **Real-Time Log Decryption**: Decrypts Kuro Games' byte substitution cipher (LUT) in `Client.log` in real time to detect hotfix restart signals (`Engine exit requested`).
 - **Seamless Steam Wrapper Lifecycle**: Keeps Steam status **"Playing"**, **Steam Overlay active**, and **playtime tracking continuous** across hotfix restarts.
@@ -10,7 +10,7 @@
 
 ---
 
-## 💻 PowerShell 1-Click Install
+## PowerShell 1-Click Install
 
 Run in PowerShell to automatically install or update `fk_kuro_launcher` and inject Steam launch options:
 
@@ -20,10 +20,10 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1
 
 ---
 
-## 🗑️ PowerShell 1-Click Uninstall
+## PowerShell 1-Click Uninstall
 
 Run in PowerShell to clean up Steam launch options and remove installed files:
 
 ```powershell
-irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/uninstall.ps1 | iex
+& { $(irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/main/install.ps1) } -Uninstall
 ```

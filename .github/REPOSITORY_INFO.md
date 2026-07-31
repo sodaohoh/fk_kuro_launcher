@@ -1,6 +1,6 @@
 # Repository Info
 
-## 📝 GitHub About Description
+## GitHub About Description
 
 ### English
 Lightweight, non-intrusive Steam wrapper & auto-restart tool for Wuthering Waves (鳴潮) written in 100% Rust. Seamlessly handles in-game hotfix restarts without interrupting Steam status or overlay.
@@ -10,6 +10,6 @@ Lightweight, non-intrusive Steam wrapper & auto-restart tool for Wuthering Waves
 
 ---
 
-## 🏷️ GitHub Topics / Tags
+## GitHub Topics / Tags
 
 `wuthering-waves`, `鳴潮`, `kuro-games`, `steam-wrapper`, `steam`, `rust`, `auto-restart`, `hotfix`, `windows`, `game-launcher`
