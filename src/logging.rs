@@ -22,9 +22,18 @@ pub(crate) fn get_appdata_dir() -> PathBuf {
 }
 
 pub(crate) fn get_launcher_log_path() -> PathBuf {
-    let dir = get_appdata_dir();
-    let _ = fs::create_dir_all(&dir);
-    dir.join("launcher.log")
+    #[cfg(test)]
+    {
+        let dir = env::temp_dir().join("fk_kuro_launcher_test_logs");
+        let _ = fs::create_dir_all(&dir);
+        dir.join("launcher_test.log")
+    }
+    #[cfg(not(test))]
+    {
+        let dir = get_appdata_dir();
+        let _ = fs::create_dir_all(&dir);
+        dir.join("launcher.log")
+    }
 }
 
 static LOG_MUTEX: Mutex<()> = Mutex::new(());
