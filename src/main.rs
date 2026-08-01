@@ -1,8 +1,28 @@
+#[cfg(test)]
+use paths::split_steam_command_args_for_test;
+mod update;
+
+use update::check_latest_release;
+#[cfg(test)]
+use update::{apply_update, is_newer_version, parse_version};
+
+mod paths;
+
+use paths::{
+    get_game_root_dir, resolve_paths, split_steam_command_args,
+};
+mod logging;
+
+use logging::{get_appdata_dir, log_stderr, log_stdout};
+#[cfg(test)]
+use logging::get_launcher_log_path;
+mod log_decoder;
+
+use log_decoder::{build_lut, decode_bytes, update_restart_marker_tail};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
@@ -11,127 +31,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::thread;
 use std::time::Duration;
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-/// Build byte substitution table (LUT) for Kuro Games Client.log
-fn build_lut() -> [Option<char>; 256] {
-    let mut lut = [None; 256];
-
-    // Punctuation & Symbols
-    lut[0xb4] = Some('[');
-    lut[0xb2] = Some(']');
-    lut[0x8b] = Some('.');
-    lut[0x9f] = Some(':');
-    lut[0xc2] = Some('-');
-    lut[0xaf] = Some('\n');
-    lut[0xe2] = Some('\r');
-    lut[0x8d] = Some('(');
-    lut[0xc6] = Some(')');
-    lut[0xd4] = Some(',');
-    lut[0x9e] = Some('q');
-    lut[0xc0] = Some('\\');
-    lut[0x2f] = Some('/');
-    lut[0x3a] = Some(':');
-    lut[0xfd] = Some(' ');
-    lut[0x85] = Some(' ');
-    lut[0xa0] = Some('O');
-
-    // Digits 0 - 9
-    lut[0x95] = Some('0');
-    lut[0xde] = Some('1');
-    lut[0x97] = Some('2');
-    lut[0xdc] = Some('3');
-    lut[0x91] = Some('4');
-    lut[0xda] = Some('5');
-    lut[0x93] = Some('6');
-    lut[0xd8] = Some('7');
-    lut[0x9d] = Some('8');
-    lut[0xd6] = Some('9');
-
-    // Uppercase Letters
-    lut[0xae] = Some('A');
-    lut[0xac] = Some('C');
-    lut[0xb8] = Some('W');
-    lut[0xe9] = Some('L');
-    lut[0xa4] = Some('K');
-    lut[0x9c] = Some('S');
-    lut[0xf7] = Some('R');
-    lut[0xf1] = Some('T');
-    lut[0xa2] = Some('M');
-    lut[0xaa] = Some('E');
-    lut[0xe1] = Some('V');
-    lut[0xf5] = Some('P');
-    lut[0xed] = Some('H');
-    lut[0xeb] = Some('N');
-    lut[0xa8] = Some('G');
-    lut[0xbe] = Some('Q');
-    lut[0xe7] = Some('B');
-    lut[0xd2] = Some('|');
-
-    // Lowercase Letters
-    lut[0x8e] = Some('a');
-    lut[0x8c] = Some('c');
-    lut[0xc1] = Some('d');
-    lut[0x8a] = Some('e');
-    lut[0xc3] = Some('f');
-    lut[0x88] = Some('g');
-    lut[0xcd] = Some('h');
-    lut[0x86] = Some('i');
-    lut[0xc9] = Some('l');
-    lut[0x82] = Some('m');
-    lut[0xcb] = Some('n');
-    lut[0x80] = Some('o');
-    lut[0xd5] = Some('p');
-    lut[0xd7] = Some('r');
-    lut[0xbc] = Some('s');
-    lut[0xd1] = Some('t');
-    lut[0x9a] = Some('u');
-    lut[0xd3] = Some('v');
-    lut[0x98] = Some('w');
-    lut[0xdd] = Some('x');
-    lut[0x96] = Some('y');
-    lut[0xdf] = Some('z');
-
-    lut
-}
-
-/// Decode raw bytes using substitution LUT
-fn decode_bytes(bytes: &[u8], lut: &[Option<char>; 256]) -> String {
-    let mut decoded = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if let Some(c) = lut[b as usize] {
-            decoded.push(c);
-        } else {
-            decoded.push(b as char);
-        }
-    }
-    decoded
-}
-
-pub fn get_game_root_dir(game_exe: &Path) -> PathBuf {
-    let path_str = game_exe.to_string_lossy();
-    let lower = path_str.to_lowercase();
-    if lower.contains("client/binaries/win64") || lower.contains(r"client\binaries\win64") {
-        if let Some(p1) = game_exe.parent() {
-            if let Some(p2) = p1.parent() {
-                if let Some(p3) = p2.parent() {
-                    if let Some(p4) = p3.parent() {
-                        if p4.as_os_str().is_empty() {
-                            return PathBuf::from(".");
-                        }
-                        return p4.to_path_buf();
-                    }
-                }
-            }
-        }
-    }
-    let parent = game_exe.parent().unwrap_or(Path::new("."));
-    if parent.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        parent.to_path_buf()
-    }
-}
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -177,54 +76,6 @@ extern "system" {
     fn GetProcessId(hProcess: *mut std::ffi::c_void) -> u32;
     fn GetExitCodeProcess(hProcess: *mut std::ffi::c_void, lpExitCode: *mut u32) -> i32;
     fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
-}
-
-fn get_appdata_dir() -> PathBuf {
-    if let Ok(local) = env::var("LOCALAPPDATA") {
-        if !local.trim().is_empty() {
-            return PathBuf::from(local).join("fk_kuro_launcher");
-        }
-    }
-    if let Ok(profile) = env::var("USERPROFILE") {
-        if !profile.trim().is_empty() {
-            return PathBuf::from(profile)
-                .join("AppData")
-                .join("Local")
-                .join("fk_kuro_launcher");
-        }
-    }
-    env::temp_dir().join("fk_kuro_launcher")
-}
-
-fn get_launcher_log_path() -> PathBuf {
-    let dir = get_appdata_dir();
-    let _ = fs::create_dir_all(&dir);
-    dir.join("launcher.log")
-}
-
-static LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn write_to_launcher_log(msg: &str) {
-    let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let log_path = get_launcher_log_path();
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{}", msg);
-    }
-}
-
-fn log_stdout(msg: &str) {
-    println!("{}", msg);
-    write_to_launcher_log(msg);
-}
-
-fn log_stderr(msg: &str) {
-    eprintln!("{}", msg);
-    write_to_launcher_log(msg);
 }
 
 #[derive(Debug)]
@@ -441,270 +292,8 @@ fn handle_spawn_error(game_exe: &str, e: &io::Error) {
     thread::sleep(Duration::from_secs(10));
 }
 
-fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
-    let s = s.trim().trim_start_matches(|c| c == 'v' || c == 'V');
-    let mut parts = s.split('.');
-    let major: u64 = parts.next()?.parse().ok()?;
-    let minor: u64 = parts.next()?.parse().ok()?;
-    let patch_str = parts.next()?;
-    let patch_num_str: String = patch_str.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let patch: u64 = patch_num_str.parse().ok()?;
-    Some((major, minor, patch))
-}
 
-fn is_newer_version(current: &str, latest: &str) -> bool {
-    if let (Some(cur), Some(lat)) = (parse_version(current), parse_version(latest)) {
-        lat > cur
-    } else {
-        false
-    }
-}
 
-fn apply_update(current_exe: &Path, new_exe: &Path) -> io::Result<()> {
-    let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
-
-    // Clean up any existing .old file from previous updates
-    if old_exe.exists() {
-        let _ = fs::remove_file(&old_exe);
-    }
-
-    // Rename currently running executable <exe_path> -> <exe_path>.old
-    fs::rename(current_exe, &old_exe)?;
-
-    // Move downloaded <exe_path>.new -> <exe_path>
-    if let Err(e) = fs::rename(new_exe, current_exe) {
-        // Rollback rename if moving new_exe failed
-        let _ = fs::rename(&old_exe, current_exe);
-        return Err(e);
-    }
-
-    // Clean up .old file if possible (may be locked on Windows until process exits)
-    let _ = fs::remove_file(&old_exe);
-
-    Ok(())
-}
-
-fn check_latest_release(current_version: &str) {
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoProfile",
-            "-Command",
-            "$ProgressPreference = 'SilentlyContinue'; try { (Invoke-RestMethod -Uri 'https://api.github.com/repos/sodaohoh/fk_kuro_launcher/releases/latest' -UserAgent 'fk_kuro_launcher' -TimeoutSec 5).tag_name } catch {}",
-        ])
-        .output();
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let latest_tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !latest_tag.is_empty() && is_newer_version(current_version, &latest_tag) {
-                log_stdout(&format!(
-                    "[INFO] New version detected ({}). Performing automatic update...",
-                    latest_tag
-                ));
-
-                if let Ok(current_exe) = env::current_exe() {
-                    let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
-                    let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
-
-                    let download_output = Command::new("powershell")
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args([
-                            "-NoProfile",
-                            "-Command",
-                            "$ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri $args[0] -OutFile $args[1] -UseBasicParsing -ErrorAction Stop } catch { exit 1 }",
-                            download_url,
-                            new_exe.to_str().unwrap_or_default(),
-                        ])
-                        .output();
-
-                    match download_output {
-                        Ok(out) if out.status.success() && new_exe.exists() => {
-                            match apply_update(&current_exe, &new_exe) {
-                                Ok(()) => {
-                                    log_stdout(&format!(
-                                        "[SUCCESS] Auto-update applied successfully! Version {} will run on next launch.",
-                                        latest_tag
-                                    ));
-                                }
-                                Err(e) => {
-                                    log_stderr(&format!("[ERROR] Auto-update failed to replace executable: {}", e));
-                                    let _ = fs::remove_file(&new_exe);
-                                }
-                            }
-                        }
-                        Ok(_) | Err(_) => {
-                            log_stderr("[ERROR] Auto-update failed during download.");
-                            if new_exe.exists() {
-                                let _ = fs::remove_file(&new_exe);
-                            }
-                        }
-                    }
-                } else {
-                    log_stderr("[ERROR] Auto-update failed: could not determine executable path.");
-                }
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn get_steam_path_from_registry() -> Option<PathBuf> {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(steam_key) = hkcu.open_subkey(r"Software\Valve\Steam") {
-        if let Ok(steam_path) = steam_key.get_value::<String, _>("SteamPath") {
-            if !steam_path.trim().is_empty() {
-                return Some(PathBuf::from(steam_path));
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
-fn get_steam_path_from_registry() -> Option<PathBuf> {
-    None
-}
-
-fn get_shipping_exe_candidates(parent: &Path) -> Vec<PathBuf> {
-    vec![
-        parent.join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
-        parent.join("Wuthering Waves Game").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
-        parent.join("Wuthering Waves").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
-        parent.join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
-    ]
-}
-
-fn get_log_candidates(parent: &Path) -> Vec<PathBuf> {
-    vec![
-        parent.join("Client").join("Saved").join("Logs").join("Client.log"),
-        parent.join("Wuthering Waves Game").join("Client").join("Saved").join("Logs").join("Client.log"),
-        parent.join("Wuthering Waves").join("Client").join("Saved").join("Logs").join("Client.log"),
-        parent.join("Saved").join("Logs").join("Client.log"),
-        parent.join("Client.log"),
-    ]
-}
-
-pub fn resolve_paths(input_exe: Option<&str>) -> (String, String, Vec<String>) {
-    let parent = if let Some(input_str) = input_exe {
-        let path = Path::new(input_str);
-        get_game_root_dir(path)
-    } else if let Some(steam_path) = get_steam_path_from_registry() {
-        let wuwa_dir = steam_path
-            .join("steamapps")
-            .join("common")
-            .join("Wuthering Waves");
-        if wuwa_dir.exists() {
-            wuwa_dir
-        } else {
-            steam_path
-                .join("steamapps")
-                .join("common")
-                .join("Wuthering Waves")
-        }
-    } else {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves")
-    };
-
-    let exe_candidates = get_shipping_exe_candidates(&parent);
-    let game_exe = if let Some(found_exe) = exe_candidates.iter().find(|cand| cand.exists()) {
-        found_exe.to_string_lossy().to_string()
-    } else if let Some(input_str) = input_exe {
-        let path = Path::new(input_str);
-        if path.exists() {
-            input_str.to_string()
-        } else {
-            exe_candidates[0].to_string_lossy().to_string()
-        }
-    } else {
-        exe_candidates[0].to_string_lossy().to_string()
-    };
-
-    let log_candidates = get_log_candidates(&parent);
-    let log_path = log_candidates
-        .iter()
-        .find(|cand| cand.exists())
-        .unwrap_or(&log_candidates[0])
-        .to_string_lossy()
-        .to_string();
-
-    (game_exe, log_path, vec![])
-}
-
-fn split_steam_command_args(args: &[String]) -> (Option<String>, Vec<String>) {
-    if args.is_empty() {
-        return (None, Vec::new());
-    }
-
-    let mut command = String::new();
-    let mut command_end = None;
-
-    for (index, arg) in args.iter().enumerate() {
-        if !command.is_empty() {
-            command.push(' ');
-        }
-        command.push_str(arg);
-
-        let command_path = Path::new(&command);
-        if command_path.is_file() || arg.to_ascii_lowercase().ends_with(".exe") {
-            command_end = Some(index + 1);
-            break;
-        }
-    }
-
-    let command_end = command_end.unwrap_or(1);
-    (
-        Some(command),
-        args.get(command_end..).unwrap_or_default().to_vec(),
-    )
-}
-
-#[cfg(test)]
-fn split_steam_command_args_for_test(args: &[&str]) -> (Option<String>, Vec<String>) {
-    split_steam_command_args(
-        &args
-            .iter()
-            .map(|arg| (*arg).to_string())
-            .collect::<Vec<_>>(),
-    )
-}
-
-const RESTART_MARKERS: [&str; 2] = ["Engine exit requested", "NeedRestart"];
-
-fn retain_restart_marker_suffix(text: &mut String) {
-    let keep_chars = RESTART_MARKERS
-        .iter()
-        .map(|marker| marker.chars().count())
-        .max()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let char_count = text.chars().count();
-    if char_count > keep_chars {
-        let start = text
-            .char_indices()
-            .nth(char_count - keep_chars)
-            .map(|(index, _)| index)
-            .unwrap_or(text.len());
-        text.drain(..start);
-    }
-}
-
-fn update_restart_marker_tail(tail: &mut String, decoded_text: &str) -> bool {
-    tail.push_str(decoded_text);
-    if RESTART_MARKERS
-        .iter()
-        .any(|marker| tail.contains(marker))
-    {
-        tail.clear();
-        true
-    } else {
-        retain_restart_marker_suffix(tail);
-        false
-    }
-}
 
 
 fn main() {
