@@ -4,11 +4,12 @@ use std::os::windows::process::CommandExt;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output};
 
 use crate::logging::{get_appdata_dir, log_stderr, log_stdout};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
 pub(crate) fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let s = s.trim().trim_start_matches(|c| c == 'v' || c == 'V');
@@ -32,6 +33,37 @@ pub(crate) fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 }
 
+/// Run a command attempting to break away from Steam's Job Object if permitted,
+/// falling back to standard `CREATE_NO_WINDOW` if breakaway is rejected by the OS.
+fn run_command_with_breakaway(cmd_name: &str, args: &[&str]) -> std::io::Result<Output> {
+    match Command::new(cmd_name)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+        .args(args)
+        .output()
+    {
+        Ok(out) => Ok(out),
+        Err(_) => Command::new(cmd_name)
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(args)
+            .output(),
+    }
+}
+
+/// Spawn a process attempting to break away from Steam's Job Object if permitted.
+fn spawn_command_with_breakaway(cmd_name: &str, args: &[&str]) -> std::io::Result<Child> {
+    match Command::new(cmd_name)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+        .args(args)
+        .spawn()
+    {
+        Ok(child) => Ok(child),
+        Err(_) => Command::new(cmd_name)
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(args)
+            .spawn(),
+    }
+}
+
 /// Download a file with resilient fallback (`curl.exe` -> `powershell`).
 pub(crate) fn download_file(url: &str, dest: &Path) -> bool {
     let dest_str = match dest.to_str() {
@@ -40,11 +72,7 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> bool {
     };
 
     // Try 1: Windows 10/11 built-in curl.exe
-    if let Ok(out) = Command::new("curl.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-sSL", "-f", "-o", dest_str, url])
-        .output()
-    {
+    if let Ok(out) = run_command_with_breakaway("curl.exe", &["-sSL", "-f", "-o", dest_str, url]) {
         if out.status.success() && dest.exists() {
             if let Ok(meta) = fs::metadata(dest) {
                 if meta.len() > 1000 {
@@ -56,9 +84,9 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> bool {
 
     // Try 2: PowerShell WebRequest with explicit scriptblock param binding
     let script = "& { param($u, $o) [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -Uri $u -OutFile $o -UserAgent 'fk_kuro_launcher' -UseBasicParsing -ErrorAction Stop } catch { exit 1 } }";
-    if let Ok(out) = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
+    if let Ok(out) = run_command_with_breakaway(
+        "powershell",
+        &[
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -66,9 +94,8 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> bool {
             script,
             url,
             dest_str,
-        ])
-        .output()
-    {
+        ],
+    ) {
         if out.status.success() && dest.exists() {
             if let Ok(meta) = fs::metadata(dest) {
                 if meta.len() > 1000 {
@@ -121,14 +148,14 @@ pub(crate) fn check_latest_release(current_version: &str) {
         return;
     }
 
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
+    let output = run_command_with_breakaway(
+        "powershell",
+        &[
             "-NoProfile",
             "-Command",
             "$ProgressPreference = 'SilentlyContinue'; try { (Invoke-RestMethod -Uri 'https://api.github.com/repos/sodaohoh/fk_kuro_launcher/releases/latest' -UserAgent 'fk_kuro_launcher' -TimeoutSec 5).tag_name } catch {}",
-        ])
-        .output();
+        ],
+    );
 
     if let Ok(output) = output {
         if output.status.success() {
@@ -154,10 +181,10 @@ pub(crate) fn check_latest_release(current_version: &str) {
                         return;
                     }
 
-                    // Launch the handoff script (fire-and-forget)
-                    let spawn_result = Command::new("powershell")
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args([
+                    // Launch the handoff script (fire-and-forget, breakaway from Steam Job Object)
+                    let spawn_result = spawn_command_with_breakaway(
+                        "powershell",
+                        &[
                             "-NoProfile",
                             "-ExecutionPolicy",
                             "Bypass",
@@ -166,8 +193,8 @@ pub(crate) fn check_latest_release(current_version: &str) {
                             &std::process::id().to_string(),
                             current_exe.to_str().unwrap_or_default(),
                             new_exe.to_str().unwrap_or_default(),
-                        ])
-                        .spawn();
+                        ],
+                    );
 
                     match spawn_result {
                         Ok(_) => {
