@@ -365,7 +365,7 @@ if (Test-Path $UserDataDir) {
             try {
                 $content = Get-Content -Path $vdfPath -Raw -Encoding UTF8
                 $vdfExePath = $InstalledExe.Replace('\', '\\')
-                $vdfLaunchOptions = "\`"$vdfExePath\`" %command%"
+                $vdfLaunchOptions = "\`"$vdfExePath\`" \`"%command%\`""
 
                 $content = Set-VdfLaunchOptions -VdfText $content -AppId "3513350" -LaunchOptionsVal $vdfLaunchOptions
                 $content = Set-VdfLaunchOptions -VdfText $content -AppId "2775500" -LaunchOptionsVal $vdfLaunchOptions

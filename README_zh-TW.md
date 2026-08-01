@@ -26,6 +26,8 @@
 irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.ps1 | iex
 ```
 
+安裝程式會刻意將 Steam 啟動選項寫成 `"fk_kuro_launcher.exe" "%command%"`。`%command%` 的引號不可刪除；如果省略，Steam 會把 `C:\Program Files\...` 這類含空格的遊戲路徑拆成多個參數，Wrapper 只會收到 `C:\Program`，因此遊戲不會啟動。若先前已安裝舊版，請重新執行安裝指令。
+
 ---
 
 ## 主要特點

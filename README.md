@@ -26,6 +26,8 @@ Run this command in PowerShell to automatically install and set up Steam Launch 
 irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.ps1 | iex
 ```
 
+The installer deliberately writes the Steam option as `"fk_kuro_launcher.exe" "%command%"`. Keep the quotes around `%command%`: without them, Steam splits an installation path such as `C:\Program Files\...` into separate arguments and the wrapper receives only `C:\Program`, so the game cannot start. Re-run the installer after updating from an older version.
+
 ---
 
 ## Key Features

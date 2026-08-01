@@ -357,8 +357,14 @@ fn spawn_via_shellexecute(
     };
 
     let res = unsafe { ShellExecuteExW(&mut info) };
-    if res == 0 || info.hProcess.is_null() {
+    if res == 0 {
         return Err(io::Error::last_os_error());
+    }
+    if info.hProcess.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "ShellExecuteExW succeeded without a process handle",
+        ));
     }
 
     let pid = unsafe { GetProcessId(info.hProcess) };
@@ -628,6 +634,44 @@ pub fn resolve_paths(input_exe: Option<&str>) -> (String, String, Vec<String>) {
     (game_exe, log_path, vec![])
 }
 
+fn split_steam_command_args(args: &[String]) -> (Option<String>, Vec<String>) {
+    if args.is_empty() {
+        return (None, Vec::new());
+    }
+
+    let mut command = String::new();
+    let mut command_end = None;
+
+    for (index, arg) in args.iter().enumerate() {
+        if !command.is_empty() {
+            command.push(' ');
+        }
+        command.push_str(arg);
+
+        let command_path = Path::new(&command);
+        if command_path.is_file() || arg.to_ascii_lowercase().ends_with(".exe") {
+            command_end = Some(index + 1);
+            break;
+        }
+    }
+
+    let command_end = command_end.unwrap_or(1);
+    (
+        Some(command),
+        args.get(command_end..).unwrap_or_default().to_vec(),
+    )
+}
+
+#[cfg(test)]
+fn split_steam_command_args_for_test(args: &[&str]) -> (Option<String>, Vec<String>) {
+    split_steam_command_args(
+        &args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn main() {
     if let Ok(current_exe) = env::current_exe() {
         let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
@@ -657,11 +701,9 @@ fn main() {
         check_latest_release(env!("CARGO_PKG_VERSION"));
     });
 
-    let input_exe = args.get(1).map(|s| s.as_str());
-    let (game_exe, log_path, mut game_args) = resolve_paths(input_exe);
-    if args.len() > 2 {
-        game_args.extend(args[2..].to_vec());
-    }
+    let (input_exe, mut game_args) = split_steam_command_args(&args[1..]);
+    let (game_exe, log_path, resolved_args) = resolve_paths(input_exe.as_deref());
+    game_args.extend(resolved_args);
 
     log_stdout("[INFO] Steam Wrapper Monitor Started.");
     log_stdout(&format!("[INFO] Executable Target: {}", game_exe));
@@ -879,6 +921,47 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_split_steam_command_args_reassembles_unquoted_path() {
+        let args = [
+            r"C:\Program",
+            r"Files",
+            r"(x86)\Steam\steamapps\common\Wuthering",
+            r"Waves\Wuthering",
+            r"Waves.exe",
+            "-dx11",
+        ];
+
+        let (game_exe, forwarded_args) = split_steam_command_args_for_test(&args);
+
+        assert_eq!(
+            game_exe,
+            Some(
+                r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves\Wuthering Waves.exe"
+                    .to_string()
+            )
+        );
+        assert_eq!(forwarded_args, vec!["-dx11"]);
+    }
+
+    #[test]
+    fn test_split_steam_command_args_preserves_quoted_path_and_args() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_steam_args");
+        let game_exe = temp_dir.join("Wuthering Waves.exe");
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(&game_exe, b"fake_exe").unwrap();
+
+        let game_exe_string = game_exe.to_string_lossy().to_string();
+        let args = [game_exe_string.as_str(), "-some-game-flag"];
+        let (resolved_exe, forwarded_args) = split_steam_command_args_for_test(&args);
+
+        assert_eq!(resolved_exe, Some(game_exe_string));
+        assert_eq!(forwarded_args, vec!["-some-game-flag"]);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[test]
     fn test_persistent_logging() {
         let test_msg = "test_persistent_logging_entry_999";

@@ -18,6 +18,7 @@ fn get_git_hash() -> String {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads/master");
     let git_hash = get_git_hash();
     println!("cargo:rustc-env=BUILD_GIT_HASH={}", git_hash);
 
