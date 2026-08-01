@@ -185,13 +185,13 @@ if ($Uninstall) {
             if (Test-Path $vdfPath) {
                 try {
                     $content = Get-Content -Path $vdfPath -Raw -Encoding UTF8
-                    if ($content -match '"2775500"') {
+                    if ($content -match '"3513350"' -or $content -match '"2775500"') {
                         # Create safety backup (.bak) before modifying
                         $bakPath = "$vdfPath.bak"
                         Copy-Item -Path $vdfPath -Destination $bakPath -Force
 
+                        $content = Set-VdfLaunchOptions -VdfText $content -AppId "3513350" -LaunchOptionsVal ""
                         $content = Set-VdfLaunchOptions -VdfText $content -AppId "2775500" -LaunchOptionsVal ""
-
                         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
                         [System.IO.File]::WriteAllText($vdfPath, $content, $utf8NoBom)
                         Write-Host "[SUCCESS] Cleared Launch Options for Steam profile: $($userDir.Name)" -ForegroundColor Green
@@ -367,6 +367,7 @@ if (Test-Path $UserDataDir) {
                 $vdfExePath = $InstalledExe.Replace('\', '\\')
                 $vdfLaunchOptions = "\`"$vdfExePath\`" %command%"
 
+                $content = Set-VdfLaunchOptions -VdfText $content -AppId "3513350" -LaunchOptionsVal $vdfLaunchOptions
                 $content = Set-VdfLaunchOptions -VdfText $content -AppId "2775500" -LaunchOptionsVal $vdfLaunchOptions
 
                 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
