@@ -4,18 +4,23 @@ mod log_decoder;
 mod logging;
 mod paths;
 mod process;
+mod single_instance;
+mod tray;
 mod update;
 
 use log_decoder::{build_lut, decode_bytes, update_restart_marker_tail};
 use logging::{log_stderr, log_stdout};
 use paths::{resolve_paths, split_steam_command_args};
 use process::{handle_spawn_error, spawn_game_process};
+use single_instance::acquire_single_instance;
+use tray::{TrayCommand, TrayStatus};
 use update::check_latest_release;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -26,9 +31,10 @@ use paths::{get_game_root_dir, split_steam_command_args_for_test};
 #[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
-use update::{apply_update, is_newer_version, parse_version};
+use update::{build_update_handoff_script, is_newer_version, parse_version};
 
 fn main() {
+    // Clean up leftover .old file from a previous update
     if let Ok(current_exe) = env::current_exe() {
         let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
         if old_exe.exists() {
@@ -47,6 +53,31 @@ fn main() {
         return;
     }
 
+    // Single-instance guard — must be held until main() returns.
+    let _instance_guard = match acquire_single_instance() {
+        Some(guard) => guard,
+        None => return,
+    };
+
+    // Create channels between tray thread and worker
+    let (status_tx, status_rx) = mpsc::channel::<TrayStatus>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TrayCommand>();
+
+    // Spawn the tray icon thread (owns the Win32 message loop)
+    let tray_handle = thread::spawn(move || {
+        tray::run_tray(status_rx, cmd_tx);
+    });
+
+    // Run the wrapper logic on the main thread
+    run_wrapper(status_tx, cmd_rx);
+
+    // Wait for the tray thread to clean up
+    let _ = tray_handle.join();
+}
+
+fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayCommand>) {
+    let _ = status_tx.send(TrayStatus::Starting);
+
     log_stdout(&format!(
         "[INFO] Version: v{} ({})",
         env!("CARGO_PKG_VERSION"),
@@ -57,6 +88,7 @@ fn main() {
         check_latest_release(env!("CARGO_PKG_VERSION"));
     });
 
+    let args: Vec<String> = env::args().collect();
     let (input_exe, mut game_args) = split_steam_command_args(&args[1..]);
     let (game_exe, log_path, resolved_args) = resolve_paths(input_exe.as_deref());
     game_args.extend(resolved_args);
@@ -77,11 +109,16 @@ fn main() {
     // Spawn child process
     let mut game_child = match spawn_game_process(&game_exe, &game_args) {
         Ok(child) => {
-            log_stdout(&format!("[INFO] Game spawned with PID: {}", child.id()));
+            let pid = child.id();
+            log_stdout(&format!("[INFO] Game spawned with PID: {}", pid));
+            let _ = status_tx.send(TrayStatus::Running { pid });
             child
         }
         Err(e) => {
+            let msg = format!("{}", e);
+            let _ = status_tx.send(TrayStatus::Failed { message: msg });
             handle_spawn_error(&game_exe, &e);
+            let _ = status_tx.send(TrayStatus::Exiting);
             return;
         }
     };
@@ -90,10 +127,13 @@ fn main() {
     let mut log_tail = String::new();
 
     loop {
-        // Drain the log before checking whether the child has exited. The game
-        // can write its restart marker and exit between two polling iterations.
+        // Check for tray exit command
+        if let Ok(TrayCommand::Exit) = cmd_rx.try_recv() {
+            log_stdout("[INFO] User requested exit from tray.");
+            break;
+        }
 
-        // Monitor Client.log for hotfix restart triggers.
+        // Drain the log before checking whether the child has exited.
         if let Ok(mut file) = OpenOptions::new()
             .read(true)
             .share_mode(7)
@@ -127,6 +167,9 @@ fn main() {
             Ok(status) => status,
             Err(e) => {
                 log_stderr(&format!("[ERROR] Error waiting on child process: {}", e));
+                let _ = status_tx.send(TrayStatus::Failed {
+                    message: format!("Wait error: {}", e),
+                });
                 break;
             }
         };
@@ -136,10 +179,13 @@ fn main() {
                 log_stdout(&format!("[INFO] Child game process exited with status: {}", status));
                 if is_hotfix_restart {
                     log_stdout("[WARN] Hotfix restart detected! Respawning child process in 3s...");
+                    let _ = status_tx.send(TrayStatus::HotfixRestart);
                     thread::sleep(Duration::from_secs(3));
                     match spawn_game_process(&game_exe, &game_args) {
                         Ok(child) => {
-                            log_stdout(&format!("[SUCCESS] Game respawned with PID: {}", child.id()));
+                            let pid = child.id();
+                            log_stdout(&format!("[SUCCESS] Game respawned with PID: {}", pid));
+                            let _ = status_tx.send(TrayStatus::Running { pid });
                             game_child = child;
                             is_hotfix_restart = false;
                             log_tail.clear();
@@ -150,6 +196,8 @@ fn main() {
                             continue;
                         }
                         Err(e) => {
+                            let msg = format!("{}", e);
+                            let _ = status_tx.send(TrayStatus::Failed { message: msg });
                             handle_spawn_error(&game_exe, &e);
                             break;
                         }
@@ -166,6 +214,8 @@ fn main() {
 
         thread::sleep(Duration::from_millis(1000));
     }
+
+    let _ = status_tx.send(TrayStatus::Exiting);
 }
 
 #[cfg(test)]
@@ -192,34 +242,15 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_update_file_replacement() {
-        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_update");
-        let _ = fs::create_dir_all(&temp_dir);
-
-        let current_exe = temp_dir.join("test_launcher.exe");
-        let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
-        let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
-
-        // Create initial current_exe and new_exe
-        fs::write(&current_exe, b"old_version_content").unwrap();
-        fs::write(&new_exe, b"new_version_content").unwrap();
-
-        // Also simulate leftover .old file from a previous update
-        fs::write(&old_exe, b"ancient_version_content").unwrap();
-
-        // Perform file replacement
-        let res = apply_update(&current_exe, &new_exe);
-        assert!(res.is_ok(), "apply_update should succeed");
-
-        // Verify replaced file content
-        let updated_content = fs::read_to_string(&current_exe).unwrap();
-        assert_eq!(updated_content, "new_version_content");
-
-        // Verify .new file is gone
-        assert!(!new_exe.exists(), ".new file should be removed after rename");
-
-        // Cleanup temp dir
-        let _ = fs::remove_dir_all(&temp_dir);
+    fn test_build_update_handoff_script() {
+        let script = build_update_handoff_script();
+        // Verify the script references the expected positional arguments
+        assert!(script.contains("$args[0]"), "Script should reference PID arg");
+        assert!(script.contains("$args[1]"), "Script should reference exe path arg");
+        assert!(script.contains("$args[2]"), "Script should reference new path arg");
+        // Verify it performs the rename dance
+        assert!(script.contains("Rename-Item"), "Script should rename files");
+        assert!(script.contains("WaitForExit"), "Script should wait for process exit");
     }
 
     #[test]

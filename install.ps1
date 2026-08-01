@@ -240,6 +240,15 @@ Write-Host "=====================================================" -ForegroundCo
 $InstallDir = Join-Path $env:LOCALAPPDATA "fk_kuro_launcher"
 $InstalledExe = Join-Path $InstallDir "fk_kuro_launcher.exe"
 
+# 1.5. Stop any running fk_kuro_launcher instances before overwriting
+$running = Get-Process -Name "fk_kuro_launcher" -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "[INFO] Stopping running fk_kuro_launcher instance(s)..." -ForegroundColor Yellow
+    Stop-Process -Name "fk_kuro_launcher" -Force -ErrorAction SilentlyContinue
+    $running | ForEach-Object { try { [void]$_.WaitForExit(5000) } catch {} }
+    Start-Sleep -Seconds 1
+}
+
 # 2. Binary Acquisition Logic
 if (-not [string]::IsNullOrWhiteSpace($ExePath)) {
     if (Test-Path $ExePath) {
@@ -384,7 +393,9 @@ if (Test-Path $UserDataDir) {
     if ($updatedCount -gt 0) {
         Write-Host "[SUCCESS] Successfully configured $updatedCount Steam user profile(s)!" -ForegroundColor Green
     } else {
-        Write-Host "[WARNING] No Steam user config (localconfig.vdf) files found under $UserDataDir." -ForegroundColor Yellow
+        Write-Host "[ERROR] No Steam profiles were configured. Steam will not use fk_kuro_launcher." -ForegroundColor Red
+        Write-Host "[INFO] Please set Steam launch options manually." -ForegroundColor Yellow
+        exit 1
     }
 } else {
     Write-Host "[ERROR] Steam userdata directory not found at $UserDataDir." -ForegroundColor Red

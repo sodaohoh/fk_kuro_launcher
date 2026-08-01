@@ -6,6 +6,7 @@ authors = ["sodaohoh"]
 description = "Wuthering Waves log monitor & auto-restart launcher"
 
 [dependencies]
+tray-icon = { version = "0.19", default-features = false }
 winreg = "0.52"
 
 [build-dependencies]

@@ -3,11 +3,10 @@ use std::os::windows::process::CommandExt;
 
 use std::env;
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-use crate::logging::{log_stderr, log_stdout};
+use crate::logging::{get_appdata_dir, log_stderr, log_stdout};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -33,21 +32,46 @@ pub(crate) fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 }
 
-pub(crate) fn apply_update(current_exe: &Path, new_exe: &Path) -> io::Result<()> {
-    let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
-    if old_exe.exists() {
-        let _ = fs::remove_file(&old_exe);
-    }
-    fs::rename(current_exe, &old_exe)?;
-    if let Err(e) = fs::rename(new_exe, current_exe) {
-        let _ = fs::rename(&old_exe, current_exe);
-        return Err(e);
-    }
-    let _ = fs::remove_file(&old_exe);
-    Ok(())
+/// Build the content of the PowerShell update handoff script.
+pub(crate) fn build_update_handoff_script() -> String {
+    r#"$targetPid = $args[0]
+$exePath = $args[1]
+$newPath = $args[2]
+$oldPath = "$exePath.old"
+# Wait for the launcher to exit
+try { (Get-Process -Id $targetPid -ErrorAction Stop).WaitForExit(30000) } catch {}
+Start-Sleep -Seconds 1
+# Perform the swap
+if (Test-Path $oldPath) { Remove-Item $oldPath -Force -ErrorAction SilentlyContinue }
+Rename-Item $exePath $oldPath -Force -ErrorAction Stop
+Rename-Item $newPath $exePath -Force -ErrorAction Stop
+Remove-Item $oldPath -Force -ErrorAction SilentlyContinue
+"#
+    .to_string()
 }
 
 pub(crate) fn check_latest_release(current_version: &str) {
+    // Guard: only auto-update when running from the canonical installed path.
+    let appdata_dir = get_appdata_dir();
+    let canonical_install = appdata_dir.join("fk_kuro_launcher.exe");
+    let current_exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(_) => {
+            log_stderr("[ERROR] Auto-update failed: could not determine executable path.");
+            return;
+        }
+    };
+
+    // Case-insensitive comparison (Windows paths)
+    if current_exe
+        .to_string_lossy()
+        .to_lowercase()
+        != canonical_install.to_string_lossy().to_lowercase()
+    {
+        log_stdout("[INFO] Running from non-installed path; skipping auto-update.");
+        return;
+    }
+
     let output = Command::new("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
@@ -62,44 +86,83 @@ pub(crate) fn check_latest_release(current_version: &str) {
             let latest_tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !latest_tag.is_empty() && is_newer_version(current_version, &latest_tag) {
                 log_stdout(&format!(
-                    "[INFO] New version detected ({}). Performing automatic update...",
+                    "[INFO] New version detected ({}). Downloading update...",
                     latest_tag
                 ));
-                if let Ok(current_exe) = env::current_exe() {
-                    let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
-                    let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
-                    let download_output = Command::new("powershell")
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args([
-                            "-NoProfile",
-                            "-Command",
-                            "$ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri $args[0] -OutFile $args[1] -UseBasicParsing -ErrorAction Stop } catch { exit 1 }",
-                            download_url,
-                            new_exe.to_str().unwrap_or_default(),
-                        ])
-                        .output();
-                    match download_output {
-                        Ok(out) if out.status.success() && new_exe.exists() => {
-                            match apply_update(&current_exe, &new_exe) {
-                                Ok(()) => log_stdout(&format!(
-                                    "[SUCCESS] Auto-update applied successfully! Version {} will run on next launch.",
-                                    latest_tag
-                                )),
-                                Err(e) => {
-                                    log_stderr(&format!("[ERROR] Auto-update failed to replace executable: {}", e));
-                                    let _ = fs::remove_file(&new_exe);
-                                }
-                            }
+
+                let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
+                let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
+                let download_output = Command::new("powershell")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        "$ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri $args[0] -OutFile $args[1] -UseBasicParsing -ErrorAction Stop } catch { exit 1 }",
+                        download_url,
+                        new_exe.to_str().unwrap_or_default(),
+                    ])
+                    .output();
+
+                match download_output {
+                    Ok(out) if out.status.success() && new_exe.exists() => {
+                        // Validate downloaded file has a reasonable size
+                        let file_ok = fs::metadata(&new_exe)
+                            .map(|m| m.len() > 1000)
+                            .unwrap_or(false);
+                        if !file_ok {
+                            log_stderr("[ERROR] Downloaded update file is too small or unreadable.");
+                            let _ = fs::remove_file(&new_exe);
+                            return;
                         }
-                        Ok(_) | Err(_) => {
-                            log_stderr("[ERROR] Auto-update failed during download.");
-                            if new_exe.exists() {
+
+                        // Write handoff script
+                        let handoff_script = appdata_dir.join("update.ps1");
+                        if let Err(e) = fs::write(&handoff_script, build_update_handoff_script()) {
+                            log_stderr(&format!(
+                                "[ERROR] Failed to write update handoff script: {}",
+                                e
+                            ));
+                            let _ = fs::remove_file(&new_exe);
+                            return;
+                        }
+
+                        // Launch the handoff script (fire-and-forget)
+                        let spawn_result = Command::new("powershell")
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .args([
+                                "-NoProfile",
+                                "-ExecutionPolicy",
+                                "Bypass",
+                                "-File",
+                                handoff_script.to_str().unwrap_or_default(),
+                                &std::process::id().to_string(),
+                                current_exe.to_str().unwrap_or_default(),
+                                new_exe.to_str().unwrap_or_default(),
+                            ])
+                            .spawn();
+
+                        match spawn_result {
+                            Ok(_) => {
+                                log_stdout(&format!(
+                                    "[INFO] Update {} downloaded. Will be applied when the launcher exits.",
+                                    latest_tag
+                                ));
+                            }
+                            Err(e) => {
+                                log_stderr(&format!(
+                                    "[ERROR] Failed to launch update handoff script: {}",
+                                    e
+                                ));
                                 let _ = fs::remove_file(&new_exe);
                             }
                         }
                     }
-                } else {
-                    log_stderr("[ERROR] Auto-update failed: could not determine executable path.");
+                    Ok(_) | Err(_) => {
+                        log_stderr("[ERROR] Auto-update failed during download.");
+                        if new_exe.exists() {
+                            let _ = fs::remove_file(&new_exe);
+                        }
+                    }
                 }
             }
         }
