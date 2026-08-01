@@ -4,7 +4,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
 use std::thread;
 use std::time::Duration;
 
@@ -105,12 +108,240 @@ fn decode_bytes(bytes: &[u8], lut: &[Option<char>; 256]) -> String {
     decoded
 }
 
-fn spawn_game_process(game_exe: &str, game_args: &[String]) -> io::Result<Child> {
-    let game_dir = Path::new(game_exe).parent().unwrap_or(Path::new("."));
-    Command::new(game_exe)
+pub fn get_game_root_dir(game_exe: &Path) -> PathBuf {
+    let path_str = game_exe.to_string_lossy();
+    let lower = path_str.to_lowercase();
+    if lower.contains("client/binaries/win64") || lower.contains(r"client\binaries\win64") {
+        if let Some(p1) = game_exe.parent() {
+            if let Some(p2) = p1.parent() {
+                if let Some(p3) = p2.parent() {
+                    if let Some(p4) = p3.parent() {
+                        if p4.as_os_str().is_empty() {
+                            return PathBuf::from(".");
+                        }
+                        return p4.to_path_buf();
+                    }
+                }
+            }
+        }
+    }
+    let parent = game_exe.parent().unwrap_or(Path::new("."));
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        parent.to_path_buf()
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct SHELLEXECUTEINFOW {
+    cbSize: u32,
+    fMask: u32,
+    hwnd: *mut std::ffi::c_void,
+    lpVerb: *const u16,
+    lpFile: *const u16,
+    lpParameters: *const u16,
+    lpDirectory: *const u16,
+    nShow: i32,
+    hInstApp: *mut std::ffi::c_void,
+    lpIDList: *mut std::ffi::c_void,
+    lpClass: *const u16,
+    hkeyClass: *mut std::ffi::c_void,
+    dwHotKey: u32,
+    hIconOrMonitor: *mut std::ffi::c_void,
+    hProcess: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteExW(pExecInfo: *mut SHELLEXECUTEINFOW) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetProcessId(hProcess: *mut std::ffi::c_void) -> u32;
+    fn GetExitCodeProcess(hProcess: *mut std::ffi::c_void, lpExitCode: *mut u32) -> i32;
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+}
+
+#[derive(Debug)]
+pub struct Win32Child {
+    handle: *mut std::ffi::c_void,
+    pid: u32,
+}
+
+unsafe impl Send for Win32Child {}
+unsafe impl Sync for Win32Child {}
+
+impl Drop for Win32Child {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            #[cfg(target_os = "windows")]
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+impl Win32Child {
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut exit_code: u32 = 0;
+            let ret = unsafe { GetExitCodeProcess(self.handle, &mut exit_code) };
+            if ret == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            const STILL_ACTIVE: u32 = 259;
+            if exit_code == STILL_ACTIVE {
+                Ok(None)
+            } else {
+                use std::os::windows::process::ExitStatusExt;
+                Ok(Some(ExitStatus::from_raw(exit_code)))
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GameChild {
+    Standard(Child),
+    Win32(Win32Child),
+}
+
+impl GameChild {
+    pub fn id(&self) -> u32 {
+        match self {
+            GameChild::Standard(child) => child.id(),
+            GameChild::Win32(child) => child.id(),
+        }
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match self {
+            GameChild::Standard(child) => child.try_wait(),
+            GameChild::Win32(child) => child.try_wait(),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_via_shellexecute(
+    game_exe: &Path,
+    game_args: &[String],
+    game_root_dir: &Path,
+) -> io::Result<GameChild> {
+    let verb_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+    let file_wide: Vec<u16> = game_exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dir_wide: Vec<u16> = game_root_dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let params_wide: Option<Vec<u16>> = if game_args.is_empty() {
+        None
+    } else {
+        let params_str = game_args
+            .iter()
+            .map(|arg| {
+                if arg.contains(' ') || arg.contains('\t') || arg.contains('"') {
+                    format!("\"{}\"", arg.replace('"', "\\\""))
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(params_str.encode_utf16().chain(std::iter::once(0)).collect())
+    };
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: 0x00000040, // SEE_MASK_NOCLOSEPROCESS
+        hwnd: std::ptr::null_mut(),
+        lpVerb: verb_wide.as_ptr(),
+        lpFile: file_wide.as_ptr(),
+        lpParameters: params_wide.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
+        lpDirectory: dir_wide.as_ptr(),
+        nShow: 1, // SW_SHOWNORMAL
+        hInstApp: std::ptr::null_mut(),
+        lpIDList: std::ptr::null_mut(),
+        lpClass: std::ptr::null(),
+        hkeyClass: std::ptr::null_mut(),
+        dwHotKey: 0,
+        hIconOrMonitor: std::ptr::null_mut(),
+        hProcess: std::ptr::null_mut(),
+    };
+
+    let res = unsafe { ShellExecuteExW(&mut info) };
+    if res == 0 || info.hProcess.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+
+    let pid = unsafe { GetProcessId(info.hProcess) };
+
+    Ok(GameChild::Win32(Win32Child {
+        handle: info.hProcess,
+        pid,
+    }))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_via_shellexecute(
+    _game_exe: &Path,
+    _game_args: &[String],
+    _game_root_dir: &Path,
+) -> io::Result<GameChild> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "ShellExecuteExW is only supported on Windows",
+    ))
+}
+
+fn spawn_game_process(game_exe: &str, game_args: &[String]) -> io::Result<GameChild> {
+    let game_exe_path = Path::new(game_exe);
+    let game_root_dir = get_game_root_dir(game_exe_path);
+
+    let spawn_res = Command::new(game_exe)
         .args(game_args)
-        .current_dir(game_dir)
-        .spawn()
+        .current_dir(&game_root_dir)
+        .spawn();
+
+    match spawn_res {
+        Ok(child) => Ok(GameChild::Standard(child)),
+        Err(e) => {
+            if e.raw_os_error() == Some(740) {
+                spawn_via_shellexecute(game_exe_path, game_args, &game_root_dir)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn handle_spawn_error(game_exe: &str, e: &io::Error) {
+    let err_msg = format!("[ERROR] Failed to spawn game process {}: {}", game_exe, e);
+    eprintln!("{}", err_msg);
+    let _ = fs::write("fk_kuro_launcher_error.log", &err_msg);
+    thread::sleep(Duration::from_secs(10));
 }
 
 fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
@@ -413,7 +644,7 @@ fn main() {
             child
         }
         Err(e) => {
-            println!("[ERROR] Failed to spawn game process: {}", e);
+            handle_spawn_error(&game_exe, &e);
             return;
         }
     };
@@ -440,7 +671,7 @@ fn main() {
                             continue;
                         }
                         Err(e) => {
-                            println!("[ERROR] Failed to respawn game process: {}", e);
+                            handle_spawn_error(&game_exe, &e);
                             break;
                         }
                     }
@@ -625,5 +856,23 @@ mod tests {
         assert_eq!(PathBuf::from(log_path), fallback_log);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_get_game_root_dir() {
+        let p1 = Path::new(r"C:\Games\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe");
+        assert_eq!(get_game_root_dir(p1), PathBuf::from(r"C:\Games\Wuthering Waves"));
+
+        let p2 = Path::new(r"C:/Games/Wuthering Waves/Client/Binaries/Win64/Client-Win64-Shipping.exe");
+        assert_eq!(get_game_root_dir(p2), PathBuf::from(r"C:/Games/Wuthering Waves"));
+
+        let p3 = Path::new(r"D:\Games\Wuthering Waves\Wuthering Waves.exe");
+        assert_eq!(get_game_root_dir(p3), PathBuf::from(r"D:\Games\Wuthering Waves"));
+
+        let p4 = Path::new(r"Client\Binaries\Win64\Client-Win64-Shipping.exe");
+        assert_eq!(get_game_root_dir(p4), PathBuf::from("."));
+
+        let p5 = Path::new("Wuthering Waves.exe");
+        assert_eq!(get_game_root_dir(p5), PathBuf::from("."));
     }
 }
