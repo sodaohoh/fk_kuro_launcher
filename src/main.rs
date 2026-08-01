@@ -672,6 +672,41 @@ fn split_steam_command_args_for_test(args: &[&str]) -> (Option<String>, Vec<Stri
     )
 }
 
+const RESTART_MARKERS: [&str; 2] = ["Engine exit requested", "NeedRestart"];
+
+fn retain_restart_marker_suffix(text: &mut String) {
+    let keep_chars = RESTART_MARKERS
+        .iter()
+        .map(|marker| marker.chars().count())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let char_count = text.chars().count();
+    if char_count > keep_chars {
+        let start = text
+            .char_indices()
+            .nth(char_count - keep_chars)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len());
+        text.drain(..start);
+    }
+}
+
+fn update_restart_marker_tail(tail: &mut String, decoded_text: &str) -> bool {
+    tail.push_str(decoded_text);
+    if RESTART_MARKERS
+        .iter()
+        .any(|marker| tail.contains(marker))
+    {
+        tail.clear();
+        true
+    } else {
+        retain_restart_marker_suffix(tail);
+        false
+    }
+}
+
+
 fn main() {
     if let Ok(current_exe) = env::current_exe() {
         let old_exe = PathBuf::from(format!("{}.old", current_exe.display()));
@@ -731,11 +766,52 @@ fn main() {
     };
 
     let mut is_hotfix_restart = false;
+    let mut log_tail = String::new();
 
     loop {
-        // Check if child game process has exited
-        match game_child.try_wait() {
-            Ok(Some(status)) => {
+        // Drain the log before checking whether the child has exited. The game
+        // can write its restart marker and exit between two polling iterations.
+
+        // Monitor Client.log for hotfix restart triggers.
+        if let Ok(mut file) = OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .open(&log_path)
+        {
+            if let Ok(metadata) = file.metadata() {
+                let file_len = metadata.len();
+                if file_len < offset {
+                    offset = 0;
+                    log_tail.clear();
+                }
+
+                if file_len > offset && file.seek(SeekFrom::Start(offset)).is_ok() {
+                    let read_size = (file_len - offset) as usize;
+                    let mut buffer = vec![0u8; read_size];
+                    if let Ok(n) = file.read(&mut buffer) {
+                        if n > 0 {
+                            offset += n as u64;
+                            let decoded_text = decode_bytes(&buffer[..n], &lut);
+                            if update_restart_marker_tail(&mut log_tail, &decoded_text) {
+                                log_stdout("[WARN] Hotfix restart requested by engine!");
+                                is_hotfix_restart = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let child_status = match game_child.try_wait() {
+            Ok(status) => status,
+            Err(e) => {
+                log_stderr(&format!("[ERROR] Error waiting on child process: {}", e));
+                break;
+            }
+        };
+
+        match child_status {
+            Some(status) => {
                 log_stdout(&format!("[INFO] Child game process exited with status: {}", status));
                 if is_hotfix_restart {
                     log_stdout("[WARN] Hotfix restart detected! Respawning child process in 3s...");
@@ -745,6 +821,7 @@ fn main() {
                             log_stdout(&format!("[SUCCESS] Game respawned with PID: {}", child.id()));
                             game_child = child;
                             is_hotfix_restart = false;
+                            log_tail.clear();
                             if let Ok(meta) = fs::metadata(&log_path) {
                                 offset = meta.len();
                             }
@@ -761,46 +838,8 @@ fn main() {
                     break;
                 }
             }
-            Ok(None) => {
-                // Child is still running
-            }
-            Err(e) => {
-                log_stderr(&format!("[ERROR] Error waiting on child process: {}", e));
-                break;
-            }
-        }
-
-        // Monitor Client.log for hotfix restart triggers
-        if let Ok(mut file) = OpenOptions::new()
-            .read(true)
-            .share_mode(7)
-            .open(&log_path)
-        {
-            if let Ok(metadata) = file.metadata() {
-                let file_len = metadata.len();
-                if file_len < offset {
-                    offset = 0;
-                }
-
-                if file_len > offset {
-                    if file.seek(SeekFrom::Start(offset)).is_ok() {
-                        let read_size = (file_len - offset) as usize;
-                        let mut buffer = vec![0u8; read_size];
-                        if let Ok(n) = file.read(&mut buffer) {
-                            if n > 0 {
-                                offset += n as u64;
-                                let decoded_text = decode_bytes(&buffer[..n], &lut);
-
-                                if decoded_text.contains("Engine exit requested")
-                                    || decoded_text.contains("NeedRestart")
-                                {
-                                    log_stdout("[WARN] Hotfix restart requested by engine!");
-                                    is_hotfix_restart = true;
-                                }
-                            }
-                        }
-                    }
-                }
+            None => {
+                // Child is still running.
             }
         }
 
@@ -861,6 +900,32 @@ mod tests {
         // Cleanup temp dir
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_restart_marker_detected_across_log_reads() {
+        let mut tail = String::new();
+
+        assert!(!update_restart_marker_tail(&mut tail, "Engine exit req"));
+        assert_eq!(tail, "Engine exit req");
+        assert!(update_restart_marker_tail(&mut tail, "uested"));
+        assert!(tail.is_empty());
+
+        assert!(!update_restart_marker_tail(&mut tail, "NeedRes"));
+        assert!(update_restart_marker_tail(&mut tail, "tart"));
+    }
+
+    #[test]
+    fn test_restart_marker_tail_is_bounded_without_marker() {
+        let mut tail = String::new();
+        let long_text = "x".repeat(256);
+
+        assert!(!update_restart_marker_tail(&mut tail, &long_text));
+        assert_eq!(
+            tail.chars().count(),
+            "Engine exit requested".chars().count() - 1
+        );
+    }
+
     #[test]
     fn test_resolve_paths_wuthering_waves_nonexistent_shipping_exe() {
         let input = r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Wuthering Waves.exe";
