@@ -16,6 +16,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -25,13 +27,38 @@ jobs:
       - name: Cargo Test
         run: cargo test --verbose
 
-      - name: Sync Cargo.toml version with Git Tag
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Determine Release & Version Tag
+        id: release_check
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}".TrimStart('v')
-          Write-Host "Syncing Cargo.toml version to $tag for tag build"
-          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$tag`"" | Set-Content Cargo.toml
+          if ("${{ github.ref }}" -like "refs/tags/*") {
+              $tag = "${{ github.ref_name }}"
+              $version = $tag.TrimStart('v')
+              Write-Host "Triggered by Git Tag: $tag"
+              "should_release=true" >> $env:GITHUB_OUTPUT
+              "tag_name=$tag" >> $env:GITHUB_OUTPUT
+              "version=$version" >> $env:GITHUB_OUTPUT
+          } else {
+              $version = (Get-Content Cargo.toml | Select-String -Pattern '^version = "(.*)"').Matches.Groups[1].Value
+              $tag = "v$version"
+              $exists = (git tag -l $tag)
+              if ($exists) {
+                  Write-Host "Tag $tag already exists on repository. Skipping automated release."
+                  "should_release=false" >> $env:GITHUB_OUTPUT
+              } else {
+                  Write-Host "Tag $tag does NOT exist yet. Proceeding with automated release for $tag!"
+                  "should_release=true" >> $env:GITHUB_OUTPUT
+                  "tag_name=$tag" >> $env:GITHUB_OUTPUT
+                  "version=$version" >> $env:GITHUB_OUTPUT
+              }
+          }
+
+      - name: Sync Cargo.toml version with Git Tag
+        if: steps.release_check.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.release_check.outputs.version }}"
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$v`"" | Set-Content Cargo.toml
 
       - name: Cargo Build Release
         run: cargo build --release
@@ -43,20 +70,39 @@ jobs:
           path: target/release/fk_kuro_launcher.exe
 
       - name: Prepare Release Notes
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.release_check.outputs.should_release == 'true'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ steps.release_check.outputs.tag_name }}"
+          $template = ""
           if (Test-Path .github/RELEASE_TEMPLATE.md) {
               $template = Get-Content .github/RELEASE_TEMPLATE.md -Raw
-              $body = $template -replace 'vX\.Y\.Z', $tag
-              [System.IO.File]::WriteAllText("release_notes.md", $body, [System.Text.Encoding]::UTF8)
+              $template = $template -replace 'vX\.Y\.Z', $tag
           }
+
+          $prevTag = (git describe --tags --abbrev=0 2>$null)
+          if ($prevTag) {
+              $commits = (git log "$prevTag..HEAD" --oneline --no-merges)
+          } else {
+              $commits = (git log -n 15 --oneline --no-merges)
+          }
+
+          $changelogSection = "`n`n## 📝 Commit History ($tag)`n"
+          if ($commits) {
+              $changelogSection += ($commits | ForEach-Object { "- $_" }) -join "`n"
+          } else {
+              $changelogSection += "- Initial release or incremental updates"
+          }
+
+          $fullBody = $template + $changelogSection
+          [System.IO.File]::WriteAllText("release_notes.md", $fullBody, [System.Text.Encoding]::UTF8)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.release_check.outputs.should_release == 'true'
         with:
+          tag_name: ${{ steps.release_check.outputs.tag_name }}
+          name: Release ${{ steps.release_check.outputs.tag_name }}
           files: target/release/fk_kuro_launcher.exe
           body_path: release_notes.md
           generate_release_notes: true
