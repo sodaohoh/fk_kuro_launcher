@@ -3,7 +3,7 @@ use std::os::windows::process::CommandExt;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::logging::{get_appdata_dir, log_stderr, log_stdout};
@@ -30,6 +30,55 @@ pub(crate) fn is_newer_version(current: &str, latest: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Download a file with resilient fallback (`curl.exe` -> `powershell`).
+pub(crate) fn download_file(url: &str, dest: &Path) -> bool {
+    let dest_str = match dest.to_str() {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Try 1: Windows 10/11 built-in curl.exe
+    if let Ok(out) = Command::new("curl.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-sSL", "-f", "-o", dest_str, url])
+        .output()
+    {
+        if out.status.success() && dest.exists() {
+            if let Ok(meta) = fs::metadata(dest) {
+                if meta.len() > 1000 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Try 2: PowerShell WebRequest with explicit scriptblock param binding
+    let script = "& { param($u, $o) [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -Uri $u -OutFile $o -UserAgent 'fk_kuro_launcher' -UseBasicParsing -ErrorAction Stop } catch { exit 1 } }";
+    if let Ok(out) = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            url,
+            dest_str,
+        ])
+        .output()
+    {
+        if out.status.success() && dest.exists() {
+            if let Ok(meta) = fs::metadata(dest) {
+                if meta.len() > 1000 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Build the content of the PowerShell update handoff script.
@@ -92,82 +141,60 @@ pub(crate) fn check_latest_release(current_version: &str) {
 
                 let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
                 let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
-                let download_output = Command::new("powershell")
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        "$ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri $args[0] -OutFile $args[1] -UseBasicParsing -ErrorAction Stop } catch { exit 1 }",
-                        download_url,
-                        new_exe.to_str().unwrap_or_default(),
-                    ])
-                    .output();
 
-                match download_output {
-                    Ok(out) if out.status.success() && new_exe.exists() => {
-                        // Validate downloaded file has a reasonable size
-                        let file_ok = fs::metadata(&new_exe)
-                            .map(|m| m.len() > 1000)
-                            .unwrap_or(false);
-                        if !file_ok {
-                            log_stderr("[ERROR] Downloaded update file is too small or unreadable.");
-                            let _ = fs::remove_file(&new_exe);
-                            return;
+                if download_file(download_url, &new_exe) {
+                    // Write handoff script
+                    let handoff_script = appdata_dir.join("update.ps1");
+                    if let Err(e) = fs::write(&handoff_script, build_update_handoff_script()) {
+                        log_stderr(&format!(
+                            "[ERROR] Failed to write update handoff script: {}",
+                            e
+                        ));
+                        let _ = fs::remove_file(&new_exe);
+                        return;
+                    }
+
+                    // Launch the handoff script (fire-and-forget)
+                    let spawn_result = Command::new("powershell")
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .args([
+                            "-NoProfile",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            handoff_script.to_str().unwrap_or_default(),
+                            &std::process::id().to_string(),
+                            current_exe.to_str().unwrap_or_default(),
+                            new_exe.to_str().unwrap_or_default(),
+                        ])
+                        .spawn();
+
+                    match spawn_result {
+                        Ok(_) => {
+                            log_stdout(&format!(
+                                "[INFO] Update {} downloaded. Will be applied when the launcher exits.",
+                                latest_tag
+                            ));
                         }
-
-                        // Write handoff script
-                        let handoff_script = appdata_dir.join("update.ps1");
-                        if let Err(e) = fs::write(&handoff_script, build_update_handoff_script()) {
+                        Err(e) => {
                             log_stderr(&format!(
-                                "[ERROR] Failed to write update handoff script: {}",
+                                "[ERROR] Failed to launch update handoff script: {}",
                                 e
                             ));
                             let _ = fs::remove_file(&new_exe);
-                            return;
-                        }
-
-                        // Launch the handoff script (fire-and-forget)
-                        let spawn_result = Command::new("powershell")
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .args([
-                                "-NoProfile",
-                                "-ExecutionPolicy",
-                                "Bypass",
-                                "-File",
-                                handoff_script.to_str().unwrap_or_default(),
-                                &std::process::id().to_string(),
-                                current_exe.to_str().unwrap_or_default(),
-                                new_exe.to_str().unwrap_or_default(),
-                            ])
-                            .spawn();
-
-                        match spawn_result {
-                            Ok(_) => {
-                                log_stdout(&format!(
-                                    "[INFO] Update {} downloaded. Will be applied when the launcher exits.",
-                                    latest_tag
-                                ));
-                            }
-                            Err(e) => {
-                                log_stderr(&format!(
-                                    "[ERROR] Failed to launch update handoff script: {}",
-                                    e
-                                ));
-                                let _ = fs::remove_file(&new_exe);
-                            }
                         }
                     }
-                    Ok(_) | Err(_) => {
-                        log_stderr("[ERROR] Auto-update failed during download.");
-                        if new_exe.exists() {
-                            let _ = fs::remove_file(&new_exe);
-                        }
+                } else {
+                    log_stderr("[ERROR] Auto-update failed during download.");
+                    if new_exe.exists() {
+                        let _ = fs::remove_file(&new_exe);
                     }
                 }
             }
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +228,20 @@ mod tests {
         // Verify it performs the rename dance
         assert!(script.contains("Rename-Item"), "Script should rename files");
         assert!(script.contains("WaitForExit"), "Script should wait for process exit");
+    }
+
+    #[test]
+    fn test_download_file_real_url() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_download");
+        let _ = fs::create_dir_all(&temp_dir);
+        let dest = temp_dir.join("test_download.exe");
+
+        let download_url = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe";
+        let success = download_file(download_url, &dest);
+        assert!(success, "download_file should succeed for latest release URL");
+        assert!(dest.exists(), "Downloaded file should exist");
+        assert!(fs::metadata(&dest).unwrap().len() > 1000, "Downloaded file should be > 1000 bytes");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
