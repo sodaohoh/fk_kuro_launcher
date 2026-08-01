@@ -28,6 +28,8 @@ irm https://raw.githubusercontent.com/sodaohoh/fk_kuro_launcher/master/install.p
 
 The installer deliberately writes the Steam option as `"fk_kuro_launcher.exe" "%command%"`. Keep the quotes around `%command%`: without them, Steam splits an installation path such as `C:\Program Files\...` into separate arguments and the wrapper receives only `C:\Program`, so the game cannot start. Re-run the installer after updating from an older version.
 
+The release launcher runs as a Windows GUI application and does not open a terminal window. Runtime diagnostics are written to `%LOCALAPPDATA%\fk_kuro_launcher\launcher.log`; fatal launch failures may still display a Windows error dialog.
+
 ---
 
 ## Key Features

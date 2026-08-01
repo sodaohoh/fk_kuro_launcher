@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod log_decoder;
 mod logging;
 mod paths;
@@ -37,12 +39,12 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
-        println!(
+        log_stdout(&format!(
             "fk_kuro_launcher v{} ({})",
             env!("CARGO_PKG_VERSION"),
             env!("BUILD_GIT_HASH")
-        );
-        std::process::exit(0);
+        ));
+        return;
     }
 
     log_stdout(&format!(

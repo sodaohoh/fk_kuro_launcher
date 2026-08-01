@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -32,17 +33,24 @@ fn write_to_launcher_log(msg: &str) {
     let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let log_path = get_launcher_log_path();
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        use std::io::Write;
         let _ = writeln!(file, "{}", msg);
     }
 }
 
+fn write_to_attached_console(msg: &str, is_error: bool) {
+    if is_error {
+        let _ = writeln!(io::stderr(), "{}", msg);
+    } else {
+        let _ = writeln!(io::stdout(), "{}", msg);
+    }
+}
+
 pub(crate) fn log_stdout(msg: &str) {
-    println!("{}", msg);
     write_to_launcher_log(msg);
+    write_to_attached_console(msg, false);
 }
 
 pub(crate) fn log_stderr(msg: &str) {
-    eprintln!("{}", msg);
     write_to_launcher_log(msg);
+    write_to_attached_console(msg, true);
 }
