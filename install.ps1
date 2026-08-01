@@ -5,6 +5,131 @@ param(
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
+function Set-VdfLaunchOptions {
+    param(
+        [string]$VdfText,
+        [string]$AppId = "2775500",
+        [string]$LaunchOptionsVal
+    )
+
+    # Clean up any corrupted lines from previous script bugs
+    $cleanLines = $VdfText -split "\r?\n" | Where-Object { $_ -notmatch '^\s*"[^"]*fk_kuro_launcher[^"]*"\s+.*' -and $_ -notmatch '^\s*"C:\\\\Users\\\\.*?' }
+
+    $inAppBlock = $false
+    $appBlockStartLine = -1
+    $appBlockEndLine = -1
+    $braceDepth = 0
+    $foundLaunchOptionsLine = -1
+
+    for ($i = 0; $i -lt $cleanLines.Count; $i++) {
+        $line = $cleanLines[$i]
+
+        if (-not $inAppBlock) {
+            if ($line -match '(?i)^\s*"' + $AppId + '"\s*$') {
+                $inAppBlock = $true
+                $appBlockStartLine = $i
+            }
+        } else {
+            if ($line -contains '{' -or $line -match '\{') {
+                $braceDepth += ($line.ToCharArray() | Where-Object { $_ -eq '{' }).Count
+            }
+            if ($line -contains '}' -or $line -match '\}') {
+                $braceDepth -= ($line.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+            }
+
+            if ($line -match '^\s*"LaunchOptions"\s+') {
+                $foundLaunchOptionsLine = $i
+            }
+
+            if ($braceDepth -eq 0 -and $appBlockStartLine -ge 0) {
+                $appBlockEndLine = $i
+                break
+            }
+        }
+    }
+
+    # Case A: AppID block found
+    if ($appBlockStartLine -ge 0) {
+        if ([string]::IsNullOrWhiteSpace($LaunchOptionsVal)) {
+            # Uninstallation mode: remove LaunchOptions line if found
+            if ($foundLaunchOptionsLine -ge 0) {
+                $cleanLines[$foundLaunchOptionsLine] = ""
+            }
+            return (($cleanLines | Where-Object { $_ -ne "" }) -join "`r`n")
+        }
+
+        if ($foundLaunchOptionsLine -ge 0) {
+            # Update existing LaunchOptions line
+            $cleanLines[$foundLaunchOptionsLine] = "`t`t`t`t`"LaunchOptions`"`t`t`"$LaunchOptionsVal`""
+        } else {
+            # Insert LaunchOptions right after the opening brace '{' of AppID block
+            $insertIdx = $appBlockStartLine + 1
+            if ($insertIdx -lt $cleanLines.Count -and $cleanLines[$insertIdx] -match '^\s*\{') {
+                $insertIdx++
+            }
+            $cleanLines = $cleanLines[0..($insertIdx-1)] + "`t`t`t`t`"LaunchOptions`"`t`t`"$LaunchOptionsVal`"" + $cleanLines[$insertIdx..($cleanLines.Count-1)]
+        }
+        return ($cleanLines -join "`r`n")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($LaunchOptionsVal)) {
+        return ($cleanLines -join "`r`n")
+    }
+
+    # Case B: AppID block not found -> Check if "Apps" or "apps" block exists
+    $appsIdx = -1
+    for ($i = 0; $i -lt $cleanLines.Count; $i++) {
+        if ($cleanLines[$i] -match '(?i)^\s*"(Apps|apps)"\s*$') {
+            $appsIdx = $i
+            break
+        }
+    }
+
+    if ($appsIdx -ge 0) {
+        $insertIdx = $appsIdx + 1
+        if ($insertIdx -lt $cleanLines.Count -and $cleanLines[$insertIdx] -match '^\s*\{') {
+            $insertIdx++
+        }
+        $newAppBlock = @(
+            "`t`t`t`t`"$AppId`"",
+            "`t`t`t`t{",
+            "`t`t`t`t`t`"LaunchOptions`"`t`t`"$LaunchOptionsVal`"",
+            "`t`t`t`t}"
+        )
+        $cleanLines = $cleanLines[0..($insertIdx-1)] + $newAppBlock + $cleanLines[$insertIdx..($cleanLines.Count-1)]
+        return ($cleanLines -join "`r`n")
+    }
+
+    # Case C: "Apps" block not found -> Check if "Steam" block exists
+    $steamIdx = -1
+    for ($i = 0; $i -lt $cleanLines.Count; $i++) {
+        if ($cleanLines[$i] -match '(?i)^\s*"Steam"\s*$') {
+            $steamIdx = $i
+            break
+        }
+    }
+
+    if ($steamIdx -ge 0) {
+        $insertIdx = $steamIdx + 1
+        if ($insertIdx -lt $cleanLines.Count -and $cleanLines[$insertIdx] -match '^\s*\{') {
+            $insertIdx++
+        }
+        $newAppsBlock = @(
+            "`t`t`t`"Apps`"",
+            "`t`t`t{",
+            "`t`t`t`t`"$AppId`"",
+            "`t`t`t`t{",
+            "`t`t`t`t`t`"LaunchOptions`"`t`t`"$LaunchOptionsVal`"",
+            "`t`t`t`t}",
+            "`t`t`t}"
+        )
+        $cleanLines = $cleanLines[0..($insertIdx-1)] + $newAppsBlock + $cleanLines[$insertIdx..($cleanLines.Count-1)]
+        return ($cleanLines -join "`r`n")
+    }
+
+    return $VdfText
+}
 if ($Uninstall) {
     Write-Host "=====================================================" -ForegroundColor Cyan
     Write-Host "   Wuthering Waves Steam Wrapper Uninstaller         " -ForegroundColor Cyan
@@ -65,8 +190,7 @@ if ($Uninstall) {
                         $bakPath = "$vdfPath.bak"
                         Copy-Item -Path $vdfPath -Destination $bakPath -Force
 
-                        $content = $content -replace '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', '$1'
-                        $content = $content -replace '(?m)^\s*"[^"]*fk_kuro_launcher[^"]*"\s+.*\r?\n', ''
+                        $content = Set-VdfLaunchOptions -VdfText $content -AppId "2775500" -LaunchOptionsVal ""
 
                         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
                         [System.IO.File]::WriteAllText($vdfPath, $content, $utf8NoBom)
@@ -137,15 +261,49 @@ if (-not [string]::IsNullOrWhiteSpace($ExePath)) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     }
     $downloadUrl = "https://github.com/sodaohoh/fk_kuro_launcher/releases/latest/download/fk_kuro_launcher.exe"
+    $downloadSuccess = $false
+
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $InstalledExe -UseBasicParsing -ErrorAction Stop
+        if (Get-Command "curl.exe" -ErrorAction SilentlyContinue) {
+            & curl.exe -sSL -f -o $InstalledExe $downloadUrl
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $InstalledExe) -and (Get-Item $InstalledExe).Length -gt 1000) {
+                $downloadSuccess = $true
+            }
+        }
+        if (-not $downloadSuccess) {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $InstalledExe -UserAgent "fk_kuro_launcher" -UseBasicParsing -ErrorAction Stop
+            if ((Test-Path $InstalledExe) -and (Get-Item $InstalledExe).Length -gt 1000) {
+                $downloadSuccess = $true
+            }
+        }
+    } catch {}
+
+    if ($downloadSuccess) {
         Write-Host "[SUCCESS] Installed fk_kuro_launcher.exe to $InstalledExe" -ForegroundColor Green
-    } catch {
-        if (Test-Path $InstalledExe) {
-            Write-Host "[WARNING] Failed to download latest release from GitHub: $_" -ForegroundColor Yellow
+    } else {
+        $localCandidates = @(
+            (Join-Path $PSScriptRoot "target\release\fk_kuro_launcher.exe"),
+            (Join-Path $PSScriptRoot "fk_kuro_launcher.exe"),
+            (Join-Path (Get-Location) "target\release\fk_kuro_launcher.exe"),
+            (Join-Path (Get-Location) "fk_kuro_launcher.exe")
+        )
+        $foundLocal = $null
+        foreach ($cand in $localCandidates) {
+            if (-not [string]::IsNullOrWhiteSpace($cand) -and (Test-Path $cand)) {
+                $foundLocal = (Get-Item $cand).FullName
+                break
+            }
+        }
+
+        if ($foundLocal) {
+            Copy-Item -Path $foundLocal -Destination $InstalledExe -Force
+            Write-Host "[SUCCESS] Installed local build executable from $foundLocal to $InstalledExe" -ForegroundColor Green
+        } elseif (Test-Path $InstalledExe) {
+            Write-Host "[WARNING] Could not download latest release from GitHub (Repo may be Private)." -ForegroundColor Yellow
             Write-Host "[INFO] Keeping existing executable at $InstalledExe" -ForegroundColor Green
         } else {
-            Write-Host "[ERROR] Failed to download fk_kuro_launcher.exe from GitHub: $_" -ForegroundColor Red
+            Write-Host "[ERROR] Could not download from GitHub (Repo is Private or offline) and no local binary found." -ForegroundColor Red
+            Write-Host "[INFO] Please build first via 'cargo build --release' or make repo Public in GitHub Settings." -ForegroundColor Yellow
             Write-Host "[ERROR] Installation aborted. Steam configuration was not modified." -ForegroundColor Red
             exit 1
         }
@@ -190,23 +348,6 @@ if ($steamProcs) {
     Start-Sleep -Seconds 2
 }
 
-function Update-SteamVdf([string]$vdfText, [string]$appId, [string]$launchOptionsVal) {
-    # Clean up any corrupted lines from previous script bugs
-    $cleanText = $vdfText -replace '(?m)^\s*"[^"]*fk_kuro_launcher[^"]*"\s+.*\r?\n', ''
-    $cleanText = $cleanText -replace '(?m)^\s*"LaunchOptions"\s+.*"LaunchOptions".*\r?\n', ''
-
-    # Check if AppID "2775500" block exists
-    if ($cleanText -match '(?i)"2775500"\s*\{') {
-        if ($cleanText -match '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*') {
-            return $cleanText -replace '(?i)("2775500"\s*\{[^{}]*?)\s*"LaunchOptions"\s+.*', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"")
-        } else {
-            return $cleanText -replace '(?i)("2775500"\s*\{)', ('$1' + "`n`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"")
-        }
-    } else {
-        $newBlock = "`"2775500`"`n`t`t`t`t{`n`t`t`t`t`t`"LaunchOptions`"`t`t`"$launchOptionsVal`"`n`t`t`t`t}"
-        return $cleanText -replace '(?i)("Apps"|"apps")\s*\{', ('$1' + "`n`t`t`t`t" + $newBlock)
-    }
-}
 
 # 5. Update localconfig.vdf with safety backups for all Steam profiles
 if (Test-Path $UserDataDir) {
@@ -226,7 +367,7 @@ if (Test-Path $UserDataDir) {
                 $vdfExePath = $InstalledExe.Replace('\', '\\')
                 $vdfLaunchOptions = "\`"$vdfExePath\`" %command%"
 
-                $content = Update-SteamVdf -vdfText $content -appId "2775500" -launchOptionsVal $vdfLaunchOptions
+                $content = Set-VdfLaunchOptions -VdfText $content -AppId "2775500" -LaunchOptionsVal $vdfLaunchOptions
 
                 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
                 [System.IO.File]::WriteAllText($vdfPath, $content, $utf8NoBom)
