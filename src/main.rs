@@ -161,11 +161,70 @@ extern "system" {
 }
 
 #[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn MessageBoxW(
+        hWnd: *mut std::ffi::c_void,
+        lpText: *const u16,
+        lpCaption: *const u16,
+        uType: u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetProcessId(hProcess: *mut std::ffi::c_void) -> u32;
     fn GetExitCodeProcess(hProcess: *mut std::ffi::c_void, lpExitCode: *mut u32) -> i32;
     fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+}
+
+fn get_appdata_dir() -> PathBuf {
+    if let Ok(local) = env::var("LOCALAPPDATA") {
+        if !local.trim().is_empty() {
+            return PathBuf::from(local).join("fk_kuro_launcher");
+        }
+    }
+    if let Ok(profile) = env::var("USERPROFILE") {
+        if !profile.trim().is_empty() {
+            return PathBuf::from(profile)
+                .join("AppData")
+                .join("Local")
+                .join("fk_kuro_launcher");
+        }
+    }
+    env::temp_dir().join("fk_kuro_launcher")
+}
+
+fn get_launcher_log_path() -> PathBuf {
+    let dir = get_appdata_dir();
+    let _ = fs::create_dir_all(&dir);
+    dir.join("launcher.log")
+}
+
+static LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_to_launcher_log(msg: &str) {
+    let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let log_path = get_launcher_log_path();
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", msg);
+    }
+}
+
+fn log_stdout(msg: &str) {
+    println!("{}", msg);
+    write_to_launcher_log(msg);
+}
+
+fn log_stderr(msg: &str) {
+    eprintln!("{}", msg);
+    write_to_launcher_log(msg);
 }
 
 #[derive(Debug)]
@@ -244,6 +303,12 @@ fn spawn_via_shellexecute(
     game_args: &[String],
     game_root_dir: &Path,
 ) -> io::Result<GameChild> {
+    if !game_exe.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Executable file not found",
+        ));
+    }
     let verb_wide: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
     let file_wide: Vec<u16> = game_exe
         .as_os_str()
@@ -328,19 +393,45 @@ fn spawn_game_process(game_exe: &str, game_args: &[String]) -> io::Result<GameCh
     match spawn_res {
         Ok(child) => Ok(GameChild::Standard(child)),
         Err(e) => {
-            if e.raw_os_error() == Some(740) {
-                spawn_via_shellexecute(game_exe_path, game_args, &game_root_dir)
-            } else {
-                Err(e)
-            }
+            log_stdout(&format!(
+                "[WARN] Direct spawn failed for {}: {}. Attempting ShellExecute runas fallback...",
+                game_exe, e
+            ));
+            spawn_via_shellexecute(game_exe_path, game_args, &game_root_dir)
         }
     }
 }
 
+#[cfg(target_os = "windows")]
+fn show_error_message_box(game_exe: &str, e: &io::Error) {
+    let title: Vec<u16> = "fk_kuro_launcher Error\0".encode_utf16().collect();
+    let message_str = format!("Failed to spawn game process:\n{}\n\nError: {}", game_exe, e);
+    let text: Vec<u16> = message_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            0x00000010, // MB_OK | MB_ICONERROR
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_error_message_box(_game_exe: &str, _e: &io::Error) {}
+
 fn handle_spawn_error(game_exe: &str, e: &io::Error) {
     let err_msg = format!("[ERROR] Failed to spawn game process {}: {}", game_exe, e);
-    eprintln!("{}", err_msg);
-    let _ = fs::write("fk_kuro_launcher_error.log", &err_msg);
+    log_stderr(&err_msg);
+
+    let appdata_dir = get_appdata_dir();
+    let _ = fs::create_dir_all(&appdata_dir);
+    let error_log_path = appdata_dir.join("fk_kuro_launcher_error.log");
+    let _ = fs::write(&error_log_path, &err_msg);
+
+    show_error_message_box(game_exe, e);
+
     thread::sleep(Duration::from_secs(10));
 }
 
@@ -401,10 +492,10 @@ fn check_latest_release(current_version: &str) {
         if output.status.success() {
             let latest_tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !latest_tag.is_empty() && is_newer_version(current_version, &latest_tag) {
-                println!(
+                log_stdout(&format!(
                     "[INFO] New version detected ({}). Performing automatic update...",
                     latest_tag
-                );
+                ));
 
                 if let Ok(current_exe) = env::current_exe() {
                     let new_exe = PathBuf::from(format!("{}.new", current_exe.display()));
@@ -425,26 +516,26 @@ fn check_latest_release(current_version: &str) {
                         Ok(out) if out.status.success() && new_exe.exists() => {
                             match apply_update(&current_exe, &new_exe) {
                                 Ok(()) => {
-                                    println!(
+                                    log_stdout(&format!(
                                         "[SUCCESS] Auto-update applied successfully! Version {} will run on next launch.",
                                         latest_tag
-                                    );
+                                    ));
                                 }
                                 Err(e) => {
-                                    println!("[ERROR] Auto-update failed to replace executable: {}", e);
+                                    log_stderr(&format!("[ERROR] Auto-update failed to replace executable: {}", e));
                                     let _ = fs::remove_file(&new_exe);
                                 }
                             }
                         }
                         Ok(_) | Err(_) => {
-                            println!("[ERROR] Auto-update failed during download.");
+                            log_stderr("[ERROR] Auto-update failed during download.");
                             if new_exe.exists() {
                                 let _ = fs::remove_file(&new_exe);
                             }
                         }
                     }
                 } else {
-                    println!("[ERROR] Auto-update failed: could not determine executable path.");
+                    log_stderr("[ERROR] Auto-update failed: could not determine executable path.");
                 }
             }
         }
@@ -472,121 +563,69 @@ fn get_steam_path_from_registry() -> Option<PathBuf> {
     None
 }
 
-fn get_client_dir(path: &Path) -> PathBuf {
-    if let Some(p1) = path.parent() {
-        if let Some(p2) = p1.parent() {
-            if let Some(p3) = p2.parent() {
-                return p3.to_path_buf();
-            }
-        }
-        return p1.to_path_buf();
-    }
-    PathBuf::from(".")
+fn get_shipping_exe_candidates(parent: &Path) -> Vec<PathBuf> {
+    vec![
+        parent.join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
+        parent.join("Wuthering Waves Game").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
+        parent.join("Wuthering Waves").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
+        parent.join("Binaries").join("Win64").join("Client-Win64-Shipping.exe"),
+    ]
 }
 
-fn resolve_log_path(primary_log: PathBuf, parent_dir: &Path) -> String {
-    let candidate1 = primary_log;
-    let candidate2 = parent_dir
-        .join("Client")
-        .join("Saved")
-        .join("Logs")
-        .join("Client.log");
-    let candidate3 = parent_dir.join("Client.log");
-
-    if candidate1.exists() {
-        candidate1.to_string_lossy().to_string()
-    } else if candidate2.exists() {
-        candidate2.to_string_lossy().to_string()
-    } else if candidate3.exists() {
-        candidate3.to_string_lossy().to_string()
-    } else {
-        candidate1.to_string_lossy().to_string()
-    }
+fn get_log_candidates(parent: &Path) -> Vec<PathBuf> {
+    vec![
+        parent.join("Client").join("Saved").join("Logs").join("Client.log"),
+        parent.join("Wuthering Waves Game").join("Client").join("Saved").join("Logs").join("Client.log"),
+        parent.join("Wuthering Waves").join("Client").join("Saved").join("Logs").join("Client.log"),
+        parent.join("Saved").join("Logs").join("Client.log"),
+        parent.join("Client.log"),
+    ]
 }
 
 pub fn resolve_paths(input_exe: Option<&str>) -> (String, String, Vec<String>) {
-    if let Some(input_str) = input_exe {
-        let path = PathBuf::from(input_str);
-        let file_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        let is_shipping_exe = file_name.eq_ignore_ascii_case("Client-Win64-Shipping.exe")
-            || path
-                .to_string_lossy()
-                .to_lowercase()
-                .contains("client-win64-shipping.exe");
-
-        if is_shipping_exe {
-            let game_exe = input_str.to_string();
-            let client_dir = get_client_dir(&path);
-            let primary_log = client_dir.join("Saved").join("Logs").join("Client.log");
-            let root_dir = client_dir.parent().unwrap_or(&client_dir);
-            let log_path = resolve_log_path(primary_log, root_dir);
-            (game_exe, log_path, vec![])
+    let parent = if let Some(input_str) = input_exe {
+        let path = Path::new(input_str);
+        get_game_root_dir(path)
+    } else if let Some(steam_path) = get_steam_path_from_registry() {
+        let wuwa_dir = steam_path
+            .join("steamapps")
+            .join("common")
+            .join("Wuthering Waves");
+        if wuwa_dir.exists() {
+            wuwa_dir
         } else {
-            let parent = path.parent().unwrap_or(Path::new("."));
-            let shipping_exe = parent
-                .join("Client")
-                .join("Binaries")
-                .join("Win64")
-                .join("Client-Win64-Shipping.exe");
-            let primary_log = parent
-                .join("Client")
-                .join("Saved")
-                .join("Logs")
-                .join("Client.log");
-
-            let game_exe = if shipping_exe.exists() {
-                shipping_exe.to_string_lossy().to_string()
-            } else if file_name.eq_ignore_ascii_case("Wuthering Waves.exe")
-                || file_name.to_lowercase().contains("wuthering waves")
-            {
-                shipping_exe.to_string_lossy().to_string()
-            } else {
-                input_str.to_string()
-            };
-
-            let log_path = resolve_log_path(primary_log, parent);
-            (game_exe, log_path, vec![])
-        }
-    } else {
-        let base_dir = if let Some(steam_path) = get_steam_path_from_registry() {
-            let wuwa_dir = steam_path
+            steam_path
                 .join("steamapps")
                 .join("common")
-                .join("Wuthering Waves");
-            if wuwa_dir.exists() {
-                wuwa_dir
-            } else {
-                steam_path
-                    .join("steamapps")
-                    .join("common")
-                    .join("Wuthering Waves")
-            }
+                .join("Wuthering Waves")
+        }
+    } else {
+        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves")
+    };
+
+    let exe_candidates = get_shipping_exe_candidates(&parent);
+    let game_exe = if let Some(found_exe) = exe_candidates.iter().find(|cand| cand.exists()) {
+        found_exe.to_string_lossy().to_string()
+    } else if let Some(input_str) = input_exe {
+        let path = Path::new(input_str);
+        if path.exists() {
+            input_str.to_string()
         } else {
-            PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Wuthering Waves")
-        };
+            exe_candidates[0].to_string_lossy().to_string()
+        }
+    } else {
+        exe_candidates[0].to_string_lossy().to_string()
+    };
 
-        let shipping_exe = base_dir
-            .join("Client")
-            .join("Binaries")
-            .join("Win64")
-            .join("Client-Win64-Shipping.exe");
-        let primary_log = base_dir
-            .join("Client")
-            .join("Saved")
-            .join("Logs")
-            .join("Client.log");
+    let log_candidates = get_log_candidates(&parent);
+    let log_path = log_candidates
+        .iter()
+        .find(|cand| cand.exists())
+        .unwrap_or(&log_candidates[0])
+        .to_string_lossy()
+        .to_string();
 
-        let log_path = resolve_log_path(primary_log, &base_dir);
-        (
-            shipping_exe.to_string_lossy().to_string(),
-            log_path,
-            vec![],
-        )
-    }
+    (game_exe, log_path, vec![])
 }
 
 fn main() {
@@ -608,11 +647,11 @@ fn main() {
         std::process::exit(0);
     }
 
-    println!(
+    log_stdout(&format!(
         "[INFO] Version: v{} ({})",
         env!("CARGO_PKG_VERSION"),
         env!("BUILD_GIT_HASH")
-    );
+    ));
 
     thread::spawn(|| {
         check_latest_release(env!("CARGO_PKG_VERSION"));
@@ -624,9 +663,9 @@ fn main() {
         game_args.extend(args[2..].to_vec());
     }
 
-    println!("[INFO] Steam Wrapper Monitor Started.");
-    println!("[INFO] Executable Target: {}", game_exe);
-    println!("[INFO] Log Target: {}", log_path);
+    log_stdout("[INFO] Steam Wrapper Monitor Started.");
+    log_stdout(&format!("[INFO] Executable Target: {}", game_exe));
+    log_stdout(&format!("[INFO] Log Target: {}", log_path));
 
     let lut = build_lut();
 
@@ -640,7 +679,7 @@ fn main() {
     // Spawn child process
     let mut game_child = match spawn_game_process(&game_exe, &game_args) {
         Ok(child) => {
-            println!("[INFO] Game spawned with PID: {}", child.id());
+            log_stdout(&format!("[INFO] Game spawned with PID: {}", child.id()));
             child
         }
         Err(e) => {
@@ -655,13 +694,13 @@ fn main() {
         // Check if child game process has exited
         match game_child.try_wait() {
             Ok(Some(status)) => {
-                println!("[INFO] Child game process exited with status: {}", status);
+                log_stdout(&format!("[INFO] Child game process exited with status: {}", status));
                 if is_hotfix_restart {
-                    println!("[WARN] Hotfix restart detected! Respawning child process in 3s...");
+                    log_stdout("[WARN] Hotfix restart detected! Respawning child process in 3s...");
                     thread::sleep(Duration::from_secs(3));
                     match spawn_game_process(&game_exe, &game_args) {
                         Ok(child) => {
-                            println!("[SUCCESS] Game respawned with PID: {}", child.id());
+                            log_stdout(&format!("[SUCCESS] Game respawned with PID: {}", child.id()));
                             game_child = child;
                             is_hotfix_restart = false;
                             if let Ok(meta) = fs::metadata(&log_path) {
@@ -676,7 +715,7 @@ fn main() {
                         }
                     }
                 } else {
-                    println!("[INFO] Normal game exit detected. Steam Wrapper shutting down.");
+                    log_stdout("[INFO] Normal game exit detected. Steam Wrapper shutting down.");
                     break;
                 }
             }
@@ -684,7 +723,7 @@ fn main() {
                 // Child is still running
             }
             Err(e) => {
-                println!("[ERROR] Error waiting on child process: {}", e);
+                log_stderr(&format!("[ERROR] Error waiting on child process: {}", e));
                 break;
             }
         }
@@ -713,7 +752,7 @@ fn main() {
                                 if decoded_text.contains("Engine exit requested")
                                     || decoded_text.contains("NeedRestart")
                                 {
-                                    println!("[WARN] Hotfix restart requested by engine!");
+                                    log_stdout("[WARN] Hotfix restart requested by engine!");
                                     is_hotfix_restart = true;
                                 }
                             }
@@ -781,16 +820,17 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
     #[test]
-    fn test_resolve_paths_wuthering_waves_shim() {
+    fn test_resolve_paths_wuthering_waves_nonexistent_shipping_exe() {
         let input = r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Wuthering Waves.exe";
         let (game_exe, log_path, game_args) = resolve_paths(Some(input));
-        let expected_game_exe = PathBuf::from(r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe")
+        // Since shipping_exe candidates do not exist and input_str does not exist on disk, fallback to candidate 1
+        let expected_candidate_1 = PathBuf::from(r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Binaries\Win64\Client-Win64-Shipping.exe")
             .to_string_lossy()
             .to_string();
+        assert_eq!(game_exe, expected_candidate_1);
         let expected_log_path = PathBuf::from(r"D:\SteamLibrary\steamapps\common\Wuthering Waves\Client\Saved\Logs\Client.log")
             .to_string_lossy()
             .to_string();
-        assert_eq!(game_exe, expected_game_exe);
         assert_eq!(log_path, expected_log_path);
         assert!(game_args.is_empty());
     }
@@ -839,6 +879,23 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+    #[test]
+    fn test_persistent_logging() {
+        let test_msg = "test_persistent_logging_entry_999";
+        log_stdout(test_msg);
+
+        let log_file = get_launcher_log_path();
+        assert!(log_file.exists(), "launcher.log should exist");
+
+        let contents = fs::read_to_string(&log_file).unwrap();
+        assert!(contents.contains(test_msg), "launcher.log should contain log entry");
+    }
+
+    #[test]
+    fn test_spawn_game_process_nonexistent() {
+        let res = spawn_game_process("non_existent_game_exe_12345.exe", &[]);
+        assert!(res.is_err(), "Spawning a non-existent binary should return Err");
+    }
 
     #[test]
     fn test_resolve_paths_fallback_client_log() {
@@ -874,5 +931,108 @@ mod tests {
 
         let p5 = Path::new("Wuthering Waves.exe");
         assert_eq!(get_game_root_dir(p5), PathBuf::from("."));
+    }
+
+    #[test]
+    fn test_multi_candidate_shipping_exe_resolution() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_multi_cand_exe");
+        let shim_exe = temp_dir.join("Wuthering Waves.exe");
+        let shim_str = shim_exe.to_str().unwrap();
+
+        // Candidate 1: Client/Binaries/Win64/Client-Win64-Shipping.exe
+        let cand1 = temp_dir.join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe");
+        // Candidate 2: Wuthering Waves Game/Client/Binaries/Win64/Client-Win64-Shipping.exe
+        let cand2 = temp_dir.join("Wuthering Waves Game").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe");
+        // Candidate 3: Wuthering Waves/Client/Binaries/Win64/Client-Win64-Shipping.exe
+        let cand3 = temp_dir.join("Wuthering Waves").join("Client").join("Binaries").join("Win64").join("Client-Win64-Shipping.exe");
+        // Candidate 4: Binaries/Win64/Client-Win64-Shipping.exe
+        let cand4 = temp_dir.join("Binaries").join("Win64").join("Client-Win64-Shipping.exe");
+
+        // Test Candidate 4
+        fs::create_dir_all(cand4.parent().unwrap()).unwrap();
+        fs::write(&cand4, b"cand4").unwrap();
+        let (resolved_exe, _, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_exe), cand4);
+
+        // Test Candidate 3 (overrides Candidate 4)
+        fs::create_dir_all(cand3.parent().unwrap()).unwrap();
+        fs::write(&cand3, b"cand3").unwrap();
+        let (resolved_exe, _, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_exe), cand3);
+
+        // Test Candidate 2 (overrides Candidate 3)
+        fs::create_dir_all(cand2.parent().unwrap()).unwrap();
+        fs::write(&cand2, b"cand2").unwrap();
+        let (resolved_exe, _, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_exe), cand2);
+
+        // Test Candidate 1 (overrides Candidate 2)
+        fs::create_dir_all(cand1.parent().unwrap()).unwrap();
+        fs::write(&cand1, b"cand1").unwrap();
+        let (resolved_exe, _, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_exe), cand1);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_candidate_shipping_exe_input_str_fallback() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_input_fallback");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let custom_exe = temp_dir.join("CustomGame.exe");
+        fs::write(&custom_exe, b"custom_exe").unwrap();
+        let custom_str = custom_exe.to_str().unwrap();
+
+        // No candidate 1..4 exists, but input_str (custom_exe) exists on disk
+        let (resolved_exe, _, _) = resolve_paths(Some(custom_str));
+        assert_eq!(resolved_exe, custom_str);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_candidate_log_resolution_order() {
+        let temp_dir = env::temp_dir().join("fk_kuro_launcher_test_multi_cand_log");
+        let shim_exe = temp_dir.join("Wuthering Waves.exe");
+        let shim_str = shim_exe.to_str().unwrap();
+
+        let log1 = temp_dir.join("Client").join("Saved").join("Logs").join("Client.log");
+        let log2 = temp_dir.join("Wuthering Waves Game").join("Client").join("Saved").join("Logs").join("Client.log");
+        let log3 = temp_dir.join("Wuthering Waves").join("Client").join("Saved").join("Logs").join("Client.log");
+        let log4 = temp_dir.join("Saved").join("Logs").join("Client.log");
+        let log5 = temp_dir.join("Client.log");
+
+        // Test candidate 5
+        fs::create_dir_all(log5.parent().unwrap()).unwrap();
+        fs::write(&log5, b"log5").unwrap();
+        let (_, resolved_log, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_log), log5);
+
+        // Test candidate 4
+        fs::create_dir_all(log4.parent().unwrap()).unwrap();
+        fs::write(&log4, b"log4").unwrap();
+        let (_, resolved_log, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_log), log4);
+
+        // Test candidate 3
+        fs::create_dir_all(log3.parent().unwrap()).unwrap();
+        fs::write(&log3, b"log3").unwrap();
+        let (_, resolved_log, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_log), log3);
+
+        // Test candidate 2
+        fs::create_dir_all(log2.parent().unwrap()).unwrap();
+        fs::write(&log2, b"log2").unwrap();
+        let (_, resolved_log, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_log), log2);
+
+        // Test candidate 1
+        fs::create_dir_all(log1.parent().unwrap()).unwrap();
+        fs::write(&log1, b"log1").unwrap();
+        let (_, resolved_log, _) = resolve_paths(Some(shim_str));
+        assert_eq!(PathBuf::from(resolved_log), log1);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
