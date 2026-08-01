@@ -25,6 +25,14 @@ jobs:
       - name: Cargo Test
         run: cargo test --verbose
 
+      - name: Sync Cargo.toml version with Git Tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          Write-Host "Syncing Cargo.toml version to $tag for tag build"
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$tag`"" | Set-Content Cargo.toml
+
       - name: Cargo Build Release
         run: cargo build --release
 
@@ -34,8 +42,21 @@ jobs:
           name: fk_kuro_launcher
           path: target/release/fk_kuro_launcher.exe
 
+      - name: Prepare Release Notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (Test-Path .github/RELEASE_TEMPLATE.md) {
+              $template = Get-Content .github/RELEASE_TEMPLATE.md -Raw
+              $body = $template -replace 'vX\.Y\.Z', $tag
+              [System.IO.File]::WriteAllText("release_notes.md", $body, [System.Text.Encoding]::UTF8)
+          }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: target/release/fk_kuro_launcher.exe
+          body_path: release_notes.md
+          generate_release_notes: true
