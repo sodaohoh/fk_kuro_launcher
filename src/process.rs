@@ -276,3 +276,13 @@ pub(crate) fn handle_spawn_error(game_exe: &str, e: &io::Error) {
     show_error_message_box(game_exe, e);
     thread::sleep(Duration::from_secs(10));
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spawn_game_process_nonexistent() {
+        let res = spawn_game_process("non_existent_game_exe_12345.exe", &[]);
+        assert!(res.is_err(), "Spawning a non-existent binary should return Err");
+    }
+}

@@ -64,12 +64,77 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Generate a 16×16 solid-color RGBA icon (blue square).
+/// Generate a 16×16 high-quality RGBA icon representing the Kuro / Wuthering Waves launcher.
+///
+/// Features a dark slate navy rounded container (`#0F172A`),
+/// a stylized gold "K" emblem (`#F59E0B`), and a glowing cyan Wuthering Wave crest (`#06B6D4`).
 fn make_default_icon_rgba() -> (Vec<u8>, u32, u32) {
     const W: u32 = 16;
     const H: u32 = 16;
-    let pixel: [u8; 4] = [0x40, 0x80, 0xFF, 0xFF]; // RGBA blue
-    let data: Vec<u8> = pixel.iter().copied().cycle().take((W * H * 4) as usize).collect();
+
+    // Color Palette [R, G, B, A]
+    const TRANSPARENT: [u8; 4]  = [0, 0, 0, 0];
+    const BORDER_OUTER: [u8; 4] = [51, 65, 85, 255];   // #334155 Slate border accent
+    const BORDER_INNER: [u8; 4] = [30, 41, 59, 255];   // #1E293B Dark slate inner border
+    const BG_NAVY: [u8; 4]      = [15, 23, 42, 255];   // #0F172A Navy background
+    const BG_DARK: [u8; 4]      = [11, 17, 32, 255];   // #0B1120 Deep navy shadow
+
+    // Gold "K" Emblem Palette
+    const GOLD_WHITE: [u8; 4]   = [255, 253, 231, 255]; // #FFFDE7 White-gold highlight
+    const GOLD_YELLOW: [u8; 4]  = [254, 240, 138, 255]; // #FEF08A Bright yellow-gold
+    const GOLD_MAIN: [u8; 4]    = [245, 158, 11, 255];  // #F59E0B Main gold
+    const GOLD_AMBER: [u8; 4]   = [217, 119, 6, 255];   // #D97706 Amber shadow
+
+    // Cyan Wuthering Wave Motif Palette
+    const CYAN_GLOW: [u8; 4]    = [207, 250, 254, 255]; // #CFFAFE Cyan sparkle highlight
+    const CYAN_LIGHT: [u8; 4]   = [103, 232, 249, 255]; // #67E8F9 Glowing cyan
+    const CYAN_MAIN: [u8; 4]    = [6, 182, 212, 255];   // #06B6D4 Main wave cyan
+    const TEAL_MAIN: [u8; 4]    = [14, 116, 144, 255];  // #0E7490 Deep wave teal
+    const TEAL_DARK: [u8; 4]    = [21, 94, 117, 255];   // #155E75 Dark teal shadow
+
+    const ICON_MAP: [&str; 16] = [
+        "..BBBBBBBBBBBB..",
+        ".bkkkkkkkkkkkkb.",
+        "BkkkkkkkkkkkkkkB",
+        "BkkWYGkkkkkkGYkB",
+        "BkkWYGkkkkkGYkkB",
+        "BkkWYGkkkkGYkkkB",
+        "BkkWYGkkkGYkkkkB",
+        "BkkWYGGGGYkkkkkB",
+        "BkkWYGGGGgkkkkkB",
+        "BkkWYGkkGYgkkkkB",
+        "BkkWYGkkkGcCckkB",
+        "BkkWYGkkkScCcCkB",
+        "BkkWYGkttcCcCtkB",
+        "BkkkkdtttDDDDdkB",
+        ".bkkkkkkkkkkkkb.",
+        "..BBBBBBBBBBBB..",
+    ];
+
+    let mut data = Vec::with_capacity((W * H * 4) as usize);
+
+    for row in ICON_MAP {
+        for ch in row.bytes() {
+            let px = match ch {
+                b'B' => BORDER_OUTER,
+                b'b' => BORDER_INNER,
+                b'k' => BG_NAVY,
+                b'd' => BG_DARK,
+                b'W' => GOLD_WHITE,
+                b'Y' => GOLD_YELLOW,
+                b'G' => GOLD_MAIN,
+                b'g' => GOLD_AMBER,
+                b'S' => CYAN_GLOW,
+                b'C' => CYAN_LIGHT,
+                b'c' => CYAN_MAIN,
+                b't' => TEAL_MAIN,
+                b'D' => TEAL_DARK,
+                _ => TRANSPARENT,
+            };
+            data.extend_from_slice(&px);
+        }
+    }
+
     (data, W, H)
 }
 
@@ -219,4 +284,30 @@ pub(crate) fn run_tray(
 
     // Dropping `tray` removes the tray icon from the notification area.
     drop(tray);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_make_default_icon_rgba_dimensions_and_buffer() {
+        let (rgba, w, h) = make_default_icon_rgba();
+        assert_eq!(w, 16);
+        assert_eq!(h, 16);
+        assert_eq!(rgba.len(), (16 * 16 * 4) as usize);
+
+        // Ensure alpha values are non-zero for non-transparent background pixels
+        // Background center pixel (e.g. x=8, y=2) should be dark navy background (#0F172A, 255)
+        let center_idx = (2 * 16 + 8) * 4;
+        assert_eq!(&rgba[center_idx..center_idx + 4], &[15, 23, 42, 255]);
+
+        // "K" Stem pixel (e.g. x=3, y=3) should be white-gold highlight (#FFFDE7, 255)
+        let stem_idx = (3 * 16 + 3) * 4;
+        assert_eq!(&rgba[stem_idx..stem_idx + 4], &[255, 253, 231, 255]);
+
+        // Cyan wave pixel (e.g. x=11, y=11) should be glowing cyan (#67E8F9, 255)
+        let wave_idx = (11 * 16 + 11) * 4;
+        assert_eq!(&rgba[wave_idx..wave_idx + 4], &[103, 232, 249, 255]);
+    }
 }

@@ -54,3 +54,20 @@ pub(crate) fn log_stderr(msg: &str) {
     write_to_launcher_log(msg);
     write_to_attached_console(msg, true);
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_persistent_logging() {
+        let test_msg = "test_persistent_logging_entry_999";
+        log_stdout(test_msg);
+
+        let log_file = get_launcher_log_path();
+        assert!(log_file.exists(), "launcher.log should exist");
+
+        let contents = fs::read_to_string(&log_file).unwrap();
+        assert!(contents.contains(test_msg), "launcher.log should contain log entry");
+    }
+}

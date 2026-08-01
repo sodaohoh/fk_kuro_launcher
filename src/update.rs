@@ -168,3 +168,38 @@ pub(crate) fn check_latest_release(current_version: &str) {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_comparison() {
+        assert_eq!(parse_version("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_version("v0.2.0"), Some((0, 2, 0)));
+        assert_eq!(parse_version("V1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version("v0.2.0-rc1"), Some((0, 2, 0)));
+
+        assert!(is_newer_version("0.1.0", "v0.2.0"));
+        assert!(is_newer_version("v0.1.0", "v0.1.1"));
+        assert!(is_newer_version("0.1.0", "v1.0.0"));
+        assert!(is_newer_version("0.9.0", "v0.10.0"));
+
+        assert!(!is_newer_version("0.1.0", "v0.1.0"));
+        assert!(!is_newer_version("0.1.0", "v0.0.9"));
+        assert!(!is_newer_version("v0.2.0", "v0.1.0"));
+        assert!(!is_newer_version("invalid", "v0.1.0"));
+        assert!(!is_newer_version("0.1.0", "invalid"));
+    }
+
+    #[test]
+    fn test_build_update_handoff_script() {
+        let script = build_update_handoff_script();
+        // Verify the script references the expected positional arguments
+        assert!(script.contains("$args[0]"), "Script should reference PID arg");
+        assert!(script.contains("$args[1]"), "Script should reference exe path arg");
+        assert!(script.contains("$args[2]"), "Script should reference new path arg");
+        // Verify it performs the rename dance
+        assert!(script.contains("Rename-Item"), "Script should rename files");
+        assert!(script.contains("WaitForExit"), "Script should wait for process exit");
+    }
+}

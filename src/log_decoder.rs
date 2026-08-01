@@ -123,3 +123,32 @@ pub(crate) fn update_restart_marker_tail(tail: &mut String, decoded_text: &str) 
         false
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_restart_marker_detected_across_log_reads() {
+        let mut tail = String::new();
+
+        assert!(!update_restart_marker_tail(&mut tail, "Engine exit req"));
+        assert_eq!(tail, "Engine exit req");
+        assert!(update_restart_marker_tail(&mut tail, "uested"));
+        assert!(tail.is_empty());
+
+        assert!(!update_restart_marker_tail(&mut tail, "NeedRes"));
+        assert!(update_restart_marker_tail(&mut tail, "tart"));
+    }
+
+    #[test]
+    fn test_restart_marker_tail_is_bounded_without_marker() {
+        let mut tail = String::new();
+        let long_text = "x".repeat(256);
+
+        assert!(!update_restart_marker_tail(&mut tail, &long_text));
+        assert_eq!(
+            tail.chars().count(),
+            "Engine exit requested".chars().count() - 1
+        );
+    }
+}
