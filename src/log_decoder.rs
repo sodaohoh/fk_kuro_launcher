@@ -93,7 +93,18 @@ pub(crate) fn decode_bytes(bytes: &[u8], lut: &[Option<char>; 256]) -> String {
     decoded
 }
 
-const RESTART_MARKERS: [&str; 2] = ["Engine exit requested", "NeedRestart"];
+/// Engine and Launcher markers indicating a hotfix or patch restart request (all lowercase for case-insensitive matching).
+const RESTART_MARKERS: [&str; 9] = [
+    "engine exit requested",
+    "needrestart",
+    "requestexit",
+    "requestexitwithstatus",
+    "kurohotpatch",
+    "move file after patch",
+    "update res version",
+    "relaunch",
+    "hotpatch restart",
+];
 
 fn retain_restart_marker_suffix(text: &mut String) {
     let keep_chars = RESTART_MARKERS
@@ -115,7 +126,8 @@ fn retain_restart_marker_suffix(text: &mut String) {
 
 pub(crate) fn update_restart_marker_tail(tail: &mut String, decoded_text: &str) -> bool {
     tail.push_str(decoded_text);
-    if RESTART_MARKERS.iter().any(|marker| tail.contains(marker)) {
+    let lower_tail = tail.to_lowercase();
+    if RESTART_MARKERS.iter().any(|marker| lower_tail.contains(marker)) {
         tail.clear();
         true
     } else {
@@ -123,6 +135,7 @@ pub(crate) fn update_restart_marker_tail(tail: &mut String, decoded_text: &str) 
         false
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,14 +154,27 @@ mod tests {
     }
 
     #[test]
+    fn test_restart_marker_case_insensitive() {
+        let mut tail = String::new();
+        assert!(update_restart_marker_tail(&mut tail, "engine exit requested"));
+        assert!(tail.is_empty());
+
+        assert!(update_restart_marker_tail(&mut tail, "MOVE FILE AFTER PATCH"));
+        assert!(tail.is_empty());
+    }
+
+    #[test]
     fn test_restart_marker_tail_is_bounded_without_marker() {
         let mut tail = String::new();
         let long_text = "x".repeat(256);
 
         assert!(!update_restart_marker_tail(&mut tail, &long_text));
-        assert_eq!(
-            tail.chars().count(),
-            "Engine exit requested".chars().count() - 1
-        );
+        let max_keep = RESTART_MARKERS
+            .iter()
+            .map(|m| m.chars().count())
+            .max()
+            .unwrap()
+            - 1;
+        assert_eq!(tail.chars().count(), max_keep);
     }
 }

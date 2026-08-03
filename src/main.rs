@@ -66,6 +66,43 @@ fn main() {
     let _ = tray_handle.join();
 }
 
+fn drain_log(
+    log_path: &str,
+    offset: &mut u64,
+    log_tail: &mut String,
+    lut: &[Option<char>; 256],
+    is_hotfix_restart: &mut bool,
+) {
+    if let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(log_path)
+    {
+        if let Ok(metadata) = file.metadata() {
+            let file_len = metadata.len();
+            if file_len < *offset {
+                *offset = 0;
+                log_tail.clear();
+            }
+
+            if file_len > *offset && file.seek(SeekFrom::Start(*offset)).is_ok() {
+                let read_size = (file_len - *offset) as usize;
+                let mut buffer = vec![0u8; read_size];
+                if let Ok(n) = file.read(&mut buffer) {
+                    if n > 0 {
+                        *offset += n as u64;
+                        let decoded_text = decode_bytes(&buffer[..n], lut);
+                        if update_restart_marker_tail(log_tail, &decoded_text) {
+                            log_stdout("[WARN] Hotfix restart requested by engine!");
+                            *is_hotfix_restart = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayCommand>) {
     let _ = status_tx.send(TrayStatus::Starting);
 
@@ -125,34 +162,7 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
         }
 
         // Drain the log before checking whether the child has exited.
-        if let Ok(mut file) = OpenOptions::new()
-            .read(true)
-            .share_mode(7)
-            .open(&log_path)
-        {
-            if let Ok(metadata) = file.metadata() {
-                let file_len = metadata.len();
-                if file_len < offset {
-                    offset = 0;
-                    log_tail.clear();
-                }
-
-                if file_len > offset && file.seek(SeekFrom::Start(offset)).is_ok() {
-                    let read_size = (file_len - offset) as usize;
-                    let mut buffer = vec![0u8; read_size];
-                    if let Ok(n) = file.read(&mut buffer) {
-                        if n > 0 {
-                            offset += n as u64;
-                            let decoded_text = decode_bytes(&buffer[..n], &lut);
-                            if update_restart_marker_tail(&mut log_tail, &decoded_text) {
-                                log_stdout("[WARN] Hotfix restart requested by engine!");
-                                is_hotfix_restart = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        drain_log(&log_path, &mut offset, &mut log_tail, &lut, &mut is_hotfix_restart);
 
         let child_status = match game_child.try_wait() {
             Ok(status) => status,
@@ -168,6 +178,9 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
         match child_status {
             Some(status) => {
                 log_stdout(&format!("[INFO] Child game process exited with status: {}", status));
+                // Perform a final log drain AFTER child termination to catch last-millisecond restart markers
+                drain_log(&log_path, &mut offset, &mut log_tail, &lut, &mut is_hotfix_restart);
+
                 if is_hotfix_restart {
                     log_stdout("[WARN] Hotfix restart detected! Respawning child process in 3s...");
                     let _ = status_tx.send(TrayStatus::HotfixRestart);
