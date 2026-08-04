@@ -83,6 +83,7 @@ fn drain_log(
             if file_len < *offset {
                 *offset = 0;
                 log_tail.clear();
+                *is_hotfix_restart = false;
             }
 
             if file_len > *offset && file.seek(SeekFrom::Start(*offset)).is_ok() {
@@ -92,7 +93,9 @@ fn drain_log(
                     if n > 0 {
                         *offset += n as u64;
                         let decoded_text = decode_bytes(&buffer[..n], lut);
-                        if update_restart_marker_tail(log_tail, &decoded_text) {
+                        if update_restart_marker_tail(log_tail, &decoded_text)
+                            && !*is_hotfix_restart
+                        {
                             log_stdout("[WARN] Hotfix restart requested by engine!");
                             *is_hotfix_restart = true;
                         }

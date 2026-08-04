@@ -44,6 +44,7 @@ pub(crate) fn build_lut() -> [Option<char>; 256] {
     lut[0xf1] = Some('T');
     lut[0xa2] = Some('M');
     lut[0xaa] = Some('E');
+    lut[0xe3] = Some('F');
     lut[0xe1] = Some('V');
     lut[0xf5] = Some('P');
     lut[0xed] = Some('H');
@@ -93,18 +94,9 @@ pub(crate) fn decode_bytes(bytes: &[u8], lut: &[Option<char>; 256]) -> String {
     decoded
 }
 
-/// Engine and Launcher markers indicating a hotfix or patch restart request (all lowercase for case-insensitive matching).
-const RESTART_MARKERS: [&str; 9] = [
-    "engine exit requested",
-    "needrestart",
-    "requestexit",
-    "requestexitwithstatus",
-    "kurohotpatch",
-    "move file after patch",
-    "update res version",
-    "relaunch",
-    "hotpatch restart",
-];
+/// Only explicit launcher intent indicates a hotfix restart.
+/// Generic exit and patch-module messages also occur during normal shutdown.
+const RESTART_MARKERS: [&str; 1] = ["hotfixrestarttocompletehotfix"];
 
 fn retain_restart_marker_suffix(text: &mut String) {
     let keep_chars = RESTART_MARKERS
@@ -141,26 +133,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_restart_marker_detected_across_log_reads() {
+    fn test_hotfix_restart_marker_detected_across_log_reads() {
         let mut tail = String::new();
 
-        assert!(!update_restart_marker_tail(&mut tail, "Engine exit req"));
-        assert_eq!(tail, "Engine exit req");
-        assert!(update_restart_marker_tail(&mut tail, "uested"));
+        assert!(!update_restart_marker_tail(
+            &mut tail,
+            "HotFixRestartToComplete"
+        ));
+        assert_eq!(tail, "HotFixRestartToComplete");
+        assert!(update_restart_marker_tail(&mut tail, "HotFix"));
         assert!(tail.is_empty());
+    }
 
-        assert!(!update_restart_marker_tail(&mut tail, "NeedRes"));
-        assert!(update_restart_marker_tail(&mut tail, "tart"));
+    #[test]
+    fn test_normal_exit_markers_do_not_request_restart() {
+        let mut tail = String::new();
+
+        assert!(!update_restart_marker_tail(
+            &mut tail,
+            "Engine exit requested (reason: EngineExit())"
+        ));
+        assert!(!update_restart_marker_tail(
+            &mut tail,
+            "KuroHotPatch module shutdown"
+        ));
+        assert!(!update_restart_marker_tail(&mut tail, "RequestExitWithStatus"));
+        assert!(!update_restart_marker_tail(&mut tail, "NeedRestart"));
     }
 
     #[test]
     fn test_restart_marker_case_insensitive() {
         let mut tail = String::new();
-        assert!(update_restart_marker_tail(&mut tail, "engine exit requested"));
+        assert!(update_restart_marker_tail(
+            &mut tail,
+            "hotfixrestarttocompletehotfix"
+        ));
         assert!(tail.is_empty());
+    }
 
-        assert!(update_restart_marker_tail(&mut tail, "MOVE FILE AFTER PATCH"));
-        assert!(tail.is_empty());
+    #[test]
+    fn test_hotfix_marker_decodes_uppercase_f_bytes() {
+        let lut = build_lut();
+        let bytes = [
+            0xed, 0x80, 0xd1, 0xe3, 0x86, 0xdd, 0xf7, 0x8a, 0x9c, 0xd1, 0x8e, 0xd7, 0xd1,
+            0xf1, 0x80, 0xac, 0x80, 0x82, 0xd5, 0xc9, 0x8a, 0xd1, 0x8a, 0xed, 0x80, 0xd1,
+            0xe3, 0x86, 0xdd,
+        ];
+
+        let decoded = decode_bytes(&bytes, &lut);
+        assert_eq!(decoded, "HotFixReStartToCompleteHotFix");
+
+        let mut tail = String::new();
+        assert!(update_restart_marker_tail(&mut tail, &decoded));
     }
 
     #[test]
