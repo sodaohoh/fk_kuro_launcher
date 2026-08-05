@@ -22,7 +22,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     // Clean up leftover .old file from a previous update
@@ -66,12 +66,14 @@ fn main() {
     let _ = tray_handle.join();
 }
 
+const HOTFIX_RESTART_INTENT_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn drain_log(
     log_path: &str,
     offset: &mut u64,
     log_tail: &mut String,
     lut: &[Option<char>; 256],
-    is_hotfix_restart: &mut bool,
+    pending_hotfix_restart: &mut Option<Instant>,
 ) {
     if let Ok(mut file) = OpenOptions::new()
         .read(true)
@@ -83,7 +85,7 @@ fn drain_log(
             if file_len < *offset {
                 *offset = 0;
                 log_tail.clear();
-                *is_hotfix_restart = false;
+                *pending_hotfix_restart = None;
             }
 
             if file_len > *offset && file.seek(SeekFrom::Start(*offset)).is_ok() {
@@ -93,11 +95,14 @@ fn drain_log(
                     if n > 0 {
                         *offset += n as u64;
                         let decoded_text = decode_bytes(&buffer[..n], lut);
-                        if update_restart_marker_tail(log_tail, &decoded_text)
-                            && !*is_hotfix_restart
-                        {
-                            log_stdout("[WARN] Hotfix restart requested by engine!");
-                            *is_hotfix_restart = true;
+                        if update_restart_marker_tail(log_tail, &decoded_text) {
+                            let intent_is_active = pending_hotfix_restart.is_some_and(|observed| {
+                                observed.elapsed() <= HOTFIX_RESTART_INTENT_TIMEOUT
+                            });
+                            if !intent_is_active {
+                                log_stdout("[WARN] Hotfix restart requested by engine!");
+                                *pending_hotfix_restart = Some(Instant::now());
+                            }
                         }
                     }
                 }
@@ -154,7 +159,7 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
         }
     };
 
-    let mut is_hotfix_restart = false;
+    let mut pending_hotfix_restart: Option<Instant> = None;
     let mut log_tail = String::new();
 
     loop {
@@ -165,7 +170,20 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
         }
 
         // Drain the log before checking whether the child has exited.
-        drain_log(&log_path, &mut offset, &mut log_tail, &lut, &mut is_hotfix_restart);
+        drain_log(
+            &log_path,
+            &mut offset,
+            &mut log_tail,
+            &lut,
+            &mut pending_hotfix_restart,
+        );
+
+        if pending_hotfix_restart.is_some_and(|observed| {
+            observed.elapsed() > HOTFIX_RESTART_INTENT_TIMEOUT
+        }) {
+            log_stdout("[INFO] Hotfix restart intent expired while game remained running.");
+            pending_hotfix_restart = None;
+        }
 
         let child_status = match game_child.try_wait() {
             Ok(status) => status,
@@ -182,9 +200,18 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
             Some(status) => {
                 log_stdout(&format!("[INFO] Child game process exited with status: {}", status));
                 // Perform a final log drain AFTER child termination to catch last-millisecond restart markers
-                drain_log(&log_path, &mut offset, &mut log_tail, &lut, &mut is_hotfix_restart);
+                drain_log(
+                    &log_path,
+                    &mut offset,
+                    &mut log_tail,
+                    &lut,
+                    &mut pending_hotfix_restart,
+                );
 
-                if is_hotfix_restart {
+                let hotfix_restart_requested = pending_hotfix_restart.is_some_and(|observed| {
+                    observed.elapsed() <= HOTFIX_RESTART_INTENT_TIMEOUT
+                });
+                if hotfix_restart_requested {
                     log_stdout("[WARN] Hotfix restart detected! Respawning child process in 3s...");
                     let _ = status_tx.send(TrayStatus::HotfixRestart);
                     thread::sleep(Duration::from_secs(3));
@@ -194,7 +221,7 @@ fn run_wrapper(status_tx: mpsc::Sender<TrayStatus>, cmd_rx: mpsc::Receiver<TrayC
                             log_stdout(&format!("[SUCCESS] Game respawned with PID: {}", pid));
                             let _ = status_tx.send(TrayStatus::Running { pid });
                             game_child = child;
-                            is_hotfix_restart = false;
+                            pending_hotfix_restart = None;
                             log_tail.clear();
                             if let Ok(meta) = fs::metadata(&log_path) {
                                 offset = meta.len();
